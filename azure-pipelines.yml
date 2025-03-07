@@ -89,15 +89,25 @@ steps:
 - script: |
     INFO_PLIST_PATH="$(Build.SourcesDirectory)/ios/Runner/Info.plist"
 
-    if [ ! -f "$INFO_PLIST_PATH" ]; then
-        echo "Error: Info.plist not found at $INFO_PLIST_PATH"
-        exit 1
+    # Info.plist가 존재하는지 확인 후 CFBundleIdentifier 추출
+    if [ -f "$INFO_PLIST_PATH" ]; then
+        echo "Info.plist found. Extracting CFBundleIdentifier..."
+        BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$INFO_PLIST_PATH" 2>/dev/null)
+    else
+        echo "Info.plist not found. Attempting to extract from Xcode build settings..."
+        
+        BUNDLE_ID=$(xcodebuild -showBuildSettings -project "$(Build.SourcesDirectory)/ios/Runner.xcodeproj" -scheme Runner | \
+            grep -E '^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER[[:space:]]*=' | sed 's/.*= //')
+
+        if [ -z "$BUNDLE_ID" ]; then
+            echo "Error: Could not extract PRODUCT_BUNDLE_IDENTIFIER from Xcode build settings."
+            exit 1
+        fi
     fi
 
-    BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$INFO_PLIST_PATH" 2>/dev/null)
-
-    if [[ -z "$BUNDLE_ID" ]]; then
-        echo "Error: Could not extract CFBundleIdentifier from Info.plist"
+    # 최종 번들 ID 검증
+    if [ -z "$BUNDLE_ID" ]; then
+        echo "Error: Bundle identifier not found."
         exit 1
     fi
 
