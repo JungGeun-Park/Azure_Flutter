@@ -47,8 +47,9 @@ steps:
   displayName: 'Setup Temporary Keychain and Install Certificate'
 
 - script: |
-    SCHEME_NAME=$(xcodebuild -list -json | (python -c 'import sys, json; print(json.load(sys.stdin)["project"]["schemes"][0])' || python3 -c 'import sys, json; print(json.load(sys.stdin)["project"]["schemes"][0])'))
-    APP_NAME=$(xcodebuild -list -json | (python -c 'import sys, json; print(json.load(sys.stdin)["project"]["targets"][0])' || python3 -c 'import sys, json; print(json.load(sys.stdin)["project"]["targets"][0])'))
+    # Flutter 프로젝트에서 iOS 설정 확인
+    SCHEME_NAME=$(flutter doctor -v | grep -A 1 "iOS toolchain" | tail -n 1 | awk '{print $1}')
+    APP_NAME="Runner"
     echo "##vso[task.setvariable variable=SCHEME_NAME]$SCHEME_NAME"
     echo "##vso[task.setvariable variable=APP_NAME]$APP_NAME"
     echo "##vso[task.logissue type=warning] Extracted SCHEME_NAME: $SCHEME_NAME"
@@ -56,8 +57,15 @@ steps:
   displayName: 'Extract Scheme and App Name'
 
 - script: |
-    # Automatically increment build number
-    cd "/Users/puzznic/Project/Azure_Agent/_work/2/s/$(APP_NAME).xcodeproj"
+    # Increment build number in Flutter project
+    cd "$(Build.SourcesDirectory)"
+    flutter pub get
+
+    # Fetch the current build number
+    CURRENT_BUILD_NUMBER=$(agvtool what-version -terse)
+    NEW_BUILD_NUMBER=$((CURRENT_BUILD_NUMBER + 1))
+
+    # Set the new build number using agvtool
     agvtool next-version -all
     NEW_BUILD_NUMBER=$(agvtool what-version -terse)
     echo "##vso[task.setvariable variable=BUILD_NUMBER]$NEW_BUILD_NUMBER"
@@ -65,24 +73,18 @@ steps:
   displayName: 'Increment Build Number'
 
 - script: |
-    INFO_PLIST_PATH="${BUILD_SOURCESDIRECTORY}/${APP_NAME}/Info.plist"
+    # Extract bundle ID from Flutter's iOS configuration
+    INFO_PLIST_PATH="$(Build.SourcesDirectory)/ios/Runner/Info.plist"
     BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$INFO_PLIST_PATH" 2>/dev/null)
 
-    # If not found in Info.plist, use xcodebuild to extract it
     if [[ -z "$BUNDLE_ID" ]]; then
-        echo "CFBundleIdentifier not found in Info.plist. Trying to extract it using xcodebuild..."
-        BUNDLE_ID=$(xcodebuild -showBuildSettings -project "${BUILD_SOURCESDIRECTORY}/Azure_Swift.xcodeproj" -scheme "${SCHEME_NAME}" | grep -E '^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER[[:space:]]*=' | sed 's/.*= //')
-    fi
-
-    # Ensure BUNDLE_ID is not empty
-    if [[ -z "$BUNDLE_ID" ]]; then
-        echo "Error: Bundle identifier not found."
+        echo "CFBundleIdentifier not found in Info.plist. Exiting."
         exit 1
     fi
 
     echo "Final BUNDLE_ID: $BUNDLE_ID"
     echo "##vso[task.setvariable variable=BUNDLE_ID]$BUNDLE_ID"
-    echo "##vso[task.logissue type=warning]Extracted Bundle ID: $BUNDLE_ID"
+    echo "##vso[task.logissue type=warning] Extracted Bundle ID: $BUNDLE_ID"
 
     # Create ExportOptions.plist after extracting the Bundle ID
     EXPORT_DIR="$HOME/exports"
@@ -109,20 +111,22 @@ steps:
     cat "$EXPORT_DIR/ExportOptions.plist"  # Output the created plist content for debugging
   displayName: 'Extract Bundle ID and Create ExportOptions.plist'
 
-
 - script: |
-    # Define paths
+    # Define paths for Flutter iOS build
     EXPORT_DIR="$(Build.ArtifactStagingDirectory)"
     IPA_PATH="$EXPORT_DIR/$(APP_NAME).ipa"
     ARCHIVE_PATH="$EXPORT_DIR/$(APP_NAME).xcarchive"
-    WORKSPACE_PATH="$(Build.SourcesDirectory)/$(APP_NAME).xcodeproj/project.xcworkspace"
+    WORKSPACE_PATH="$(Build.SourcesDirectory)/ios/Runner.xcworkspace"
 
-    echo "Updating Deployment Target to 12.0..."
-    /usr/libexec/PlistBuddy -c "Set :IPHONEOS_DEPLOYMENT_TARGET 12.0" "$(Build.SourcesDirectory)/$(APP_NAME)/Info.plist"
+    # Ensure minimum deployment target is set
+    /usr/libexec/PlistBuddy -c "Set :IPHONEOS_DEPLOYMENT_TARGET 12.0" "$(Build.SourcesDirectory)/ios/Runner/Info.plist"
 
-    echo "Starting Xcode Archive..."
+    # Build iOS Flutter app
+    flutter build ios --release --no-codesign
+
+    # Create .xcarchive
     xcodebuild -workspace "$WORKSPACE_PATH" \
-               -scheme '$(SCHEME_NAME)' \
+               -scheme 'Runner' \
                -sdk iphoneos \
                -configuration 'Release' \
                clean archive \
@@ -132,10 +136,10 @@ steps:
                PROVISIONING_PROFILE_SPECIFIER="${{ parameters.PROVISIONING_PROFILE_NAME }}" \
                -archivePath "$ARCHIVE_PATH"
 
-    echo "Exporting IPA..."
+    # Export IPA file
     xcodebuild -exportArchive \
       -archivePath "$ARCHIVE_PATH" \
-      -exportOptionsPlist "$HOME/exports/ExportOptions.plist" \
+      -exportOptionsPlist "$EXPORT_DIR/ExportOptions.plist" \
       -exportPath "$EXPORT_DIR"
 
     echo "IPA successfully exported: $IPA_PATH"
