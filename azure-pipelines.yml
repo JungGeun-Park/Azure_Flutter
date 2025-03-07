@@ -87,12 +87,17 @@ steps:
   displayName: 'Increment Build Number'
 
 - script: |
-    # Extract bundle ID from Flutter's iOS configuration
     INFO_PLIST_PATH="$(Build.SourcesDirectory)/ios/Runner/Info.plist"
+
+    if [ ! -f "$INFO_PLIST_PATH" ]; then
+        echo "Error: Info.plist not found at $INFO_PLIST_PATH"
+        exit 1
+    fi
+
     BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$INFO_PLIST_PATH" 2>/dev/null)
 
     if [[ -z "$BUNDLE_ID" ]]; then
-        echo "CFBundleIdentifier not found in Info.plist. Exiting."
+        echo "Error: Could not extract CFBundleIdentifier from Info.plist"
         exit 1
     fi
 
