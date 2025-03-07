@@ -20,6 +20,20 @@ parameters:
 
 steps:
 - script: |
+    # Check if Flutter is installed, if not, install it
+    if ! command -v flutter &> /dev/null
+    then
+        echo "Flutter is not installed. Installing Flutter..."
+
+        # Install dependencies
+        brew install --cask flutter
+
+        # Verify installation
+        flutter --version
+    else
+        echo "Flutter is already installed."
+    fi
+    
     # Define paths
     P12_CERT_PATH="$(Build.SourcesDirectory)/distribution.p12"
     PROVISIONING_PROFILE_PATH="$(Build.SourcesDirectory)/profile.mobileprovision"
