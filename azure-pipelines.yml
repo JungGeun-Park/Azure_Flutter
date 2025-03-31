@@ -190,31 +190,21 @@ steps:
   displayName: 'Build and Export IPA'
 
 - script: |
-    EXPORT_DIR="$(Build.ArtifactStagingDirectory)"
-    IPA_PATH="$EXPORT_DIR/$(APP_NAME).ipa"
-    ls -l "$EXPORT_DIR"
-    ls -l "$EXPORT_DIR/*.ipa"  # 파일 존재 확인
-    stat "$IPA_PATH"   # 파일 권한 확인
-  displayName: Verify IPA
-
-- script: |
     # Grant execution permission to generate_hash script
     HASH_SCRIPT_PATH="$(Build.SourcesDirectory)/ios/AppSealingSDK/Tools/generate_hash"
     EXPORT_DIR="$(Build.ArtifactStagingDirectory)"
-    IPA_PATH="$EXPORT_DIR/$(APP_NAME).ipa"
+    IPA_PATH=$(find "$EXPORT_DIR" -type f -name "*.ipa" | head -n 1)
 
     echo "Granting execution permission to generate_hash..."
     chmod +x "$HASH_SCRIPT_PATH"
 
     echo "Running generate_hash with IPA..."
     "$HASH_SCRIPT_PATH" "$IPA_PATH"
-
-    echo "Hash generation completed."
   displayName: 'Run generate_hash on IPA'
 
 - script: |
     EXPORT_DIR="$(Build.ArtifactStagingDirectory)"
-    IPA_PATH="$EXPORT_DIR/$(APP_NAME).ipa"
+    IPA_PATH=$(find "$EXPORT_DIR" -type f -name "*.ipa" | head -n 1)
     set -x
     xcrun altool --upload-app -f "$IPA_PATH" -t ios -u "${{ parameters.APPLE_ID }}" -p "${{ parameters.APP_SPECIFIC_PASSWORD }}"
   displayName: 'Upload to TestFlight'
