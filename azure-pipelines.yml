@@ -130,8 +130,9 @@ steps:
     echo "##vso[task.logissue type=warning] Extracted Bundle ID: $BUNDLE_ID"
 
     # Create ExportOptions.plist after extracting the Bundle ID
-    EXPORT_DIR="$HOME/exports"
+    EXPORT_DIR="$(Build.ArtifactStagingDirectory)"  # 절대 경로로 통일
     mkdir -p "$EXPORT_DIR"
+
     cat << EOF > "$EXPORT_DIR/ExportOptions.plist"
     <?xml version="1.0" encoding="UTF-8"?>
     <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -150,10 +151,17 @@ steps:
     </plist>
     EOF
 
-    chmod 644 "$EXPORT_DIR/ExportOptions.plist"
     echo "ExportOptions.plist created with provisioningProfiles and bundle ID."
     cat "$EXPORT_DIR/ExportOptions.plist"  # Output the created plist content for debugging
   displayName: 'Extract Bundle ID and Create ExportOptions.plist'
+
+- script: |
+    EXPORT_DIR="$(Build.ArtifactStagingDirectory)"
+    echo "##vso[task.logissue type=warning] EXPORT_DIR: $EXPORT_DIR"
+    ls -l "$EXPORT_DIR/ExportOptions.plist"  # 파일 존재 확인
+    cat "$EXPORT_DIR/ExportOptions.plist"    # 파일 내용 출력
+    stat "$EXPORT_DIR/ExportOptions.plist"   # 파일 권한 확인
+  displayName: 'Verify ExportOptions.plist'
 
 - script: |
     # Define paths for Flutter iOS build
