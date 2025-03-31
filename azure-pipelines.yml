@@ -89,18 +89,21 @@ steps:
 - script: |
     INFO_PLIST_PATH="$(Build.SourcesDirectory)/ios/Runner/Info.plist"
 
-    # Info.plist가 존재하는지 확인 후 CFBundleIdentifier 추출
+    # Info.plist에서 CFBundleIdentifier 가져오기
     if [ -f "$INFO_PLIST_PATH" ]; then
-        echo "Info.plist found. Extracting CFBundleIdentifier..."
+        echo "Info.plist 발견됨. CFBundleIdentifier 추출 중..."
         BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$INFO_PLIST_PATH" 2>/dev/null)
-    else
-        echo "Info.plist not found. Attempting to extract from Xcode build settings..."
+    fi
+
+    # Info.plist에서 가져온 값이 없거나 $(PRODUCT_BUNDLE_IDENTIFIER)라면 Xcode 설정에서 가져오기
+    if [ -z "$BUNDLE_ID" ] || [[ "$BUNDLE_ID" == *"PRODUCT_BUNDLE_IDENTIFIER"* ]]; then
+        echo "Info.plist에서 번들 ID를 찾을 수 없음. Xcode 설정에서 추출 중..."
         
-        BUNDLE_ID=$(xcodebuild -showBuildSettings -project "$(Build.SourcesDirectory)/ios/Runner.xcodeproj" -scheme Runner | \
-            grep -E '^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER[[:space:]]*=' | sed 's/.*= //')
+        BUNDLE_ID=$(xcodebuild -showBuildSettings -scheme Runner 2>/dev/null | \
+            awk -F ' = ' '/PRODUCT_BUNDLE_IDENTIFIER/ {print $2}' | xargs)
 
         if [ -z "$BUNDLE_ID" ]; then
-            echo "Error: Could not extract PRODUCT_BUNDLE_IDENTIFIER from Xcode build settings."
+            echo "오류: Xcode 설정에서 PRODUCT_BUNDLE_IDENTIFIER를 찾을 수 없음."
             exit 1
         fi
     fi
