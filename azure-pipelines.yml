@@ -192,6 +192,7 @@ steps:
 - script: |
     EXPORT_DIR="$(Build.ArtifactStagingDirectory)"
     IPA_PATH="$EXPORT_DIR/$(APP_NAME).ipa"
+    ls -l "$EXPORT_DIR"
     ls -l "$EXPORT_DIR/*.ipa"  # 파일 존재 확인
     stat "$IPA_PATH"   # 파일 권한 확인
   displayName: Verify IPA
