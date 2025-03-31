@@ -95,12 +95,17 @@ steps:
         BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$INFO_PLIST_PATH" 2>/dev/null)
     fi
 
-    # Info.plist에서 가져온 값이 없거나 $(PRODUCT_BUNDLE_IDENTIFIER)라면 Xcode 설정에서 가져오기
+    # Info.plist에서 가져온 값이 비어 있거나 $(PRODUCT_BUNDLE_IDENTIFIER)라면 Xcode 설정에서 가져오기
     if [ -z "$BUNDLE_ID" ] || [[ "$BUNDLE_ID" == *"PRODUCT_BUNDLE_IDENTIFIER"* ]]; then
         echo "Info.plist에서 번들 ID를 찾을 수 없음. Xcode 설정에서 추출 중..."
+
+        # 먼저 xcodebuild가 정상적으로 실행되는지 확인
+        xcodebuild -list
         
-        BUNDLE_ID=$(xcodebuild -showBuildSettings -scheme Runner 2>/dev/null | \
-            awk -F ' = ' '/PRODUCT_BUNDLE_IDENTIFIER/ {print $2}' | xargs)
+        # xcodebuild에서 번들 ID 가져오기 (workspace와 project 직접 지정)
+        BUNDLE_ID=$(xcodebuild -showBuildSettings \
+            -workspace "$(Build.SourcesDirectory)/ios/Runner.xcworkspace" \
+            -scheme Runner 2>/dev/null | awk -F ' = ' '/PRODUCT_BUNDLE_IDENTIFIER/ {print $2}' | xargs)
 
         if [ -z "$BUNDLE_ID" ]; then
             echo "오류: Xcode 설정에서 PRODUCT_BUNDLE_IDENTIFIER를 찾을 수 없음."
