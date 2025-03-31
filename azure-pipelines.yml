@@ -35,8 +35,8 @@ steps:
     fi
     
     # Define paths
-    P12_CERT_PATH="$(Build.SourcesDirectory)/distribution.p12"
-    PROVISIONING_PROFILE_PATH="$(Build.SourcesDirectory)/profile.mobileprovision"
+    P12_CERT_PATH="$(Build.SourcesDirectory)/ios/distribution.p12"
+    PROVISIONING_PROFILE_PATH="$(Build.SourcesDirectory)/ios/profile.mobileprovision"
     KEYCHAIN_PATH="$HOME/Library/Keychains/temp-keychain.keychain-db"
     KEYCHAIN_PASSWORD="temp123"
 
