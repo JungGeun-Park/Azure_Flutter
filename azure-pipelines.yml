@@ -89,33 +89,30 @@ steps:
 - script: |
     INFO_PLIST_PATH="$(Build.SourcesDirectory)/ios/Runner/Info.plist"
 
-    # Info.plist에서 CFBundleIdentifier 가져오기
+    # 1️⃣ Try to get CFBundleIdentifier from Info.plist
     if [ -f "$INFO_PLIST_PATH" ]; then
-        echo "Info.plist 발견됨. CFBundleIdentifier 추출 중..."
+        echo "✅ Info.plist found. Extracting CFBundleIdentifier..."
         BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$INFO_PLIST_PATH" 2>/dev/null)
     fi
 
-    # Info.plist에서 가져온 값이 비어 있거나 $(PRODUCT_BUNDLE_IDENTIFIER)라면 Xcode 설정에서 가져오기
+    # 2️⃣ If Info.plist does not contain a valid bundle ID, extract from Xcode build settings
     if [ -z "$BUNDLE_ID" ] || [[ "$BUNDLE_ID" == *"PRODUCT_BUNDLE_IDENTIFIER"* ]]; then
-        echo "Info.plist에서 번들 ID를 찾을 수 없음. Xcode 설정에서 추출 중..."
+        echo "⚠️  CFBundleIdentifier not found in Info.plist. Extracting from Xcode build settings..."
 
-        # Xcode build settings에서 가져오기
-        BUNDLE_ID=$(xcodebuild -showBuildSettings \
-            -workspace "$(Build.SourcesDirectory)/ios/Runner.xcworkspace" \
-            -scheme Runner 2>/dev/null | grep 'PRODUCT_BUNDLE_IDENTIFIER' | awk -F ' = ' '{print $2}' | xargs)
-
-        # 만약 여러 줄이 출력되면 올바른 줄만 선택
-        BUNDLE_ID=$(echo "$BUNDLE_ID" | grep -E '^com\.')
+        BUNDLE_ID=$(xcodebuild -project "$(Build.SourcesDirectory)/ios/Runner.xcodeproj" \
+                                -scheme Runner \
+                                -showBuildSettings 2>/dev/null | \
+                    grep -m 1 'PRODUCT_BUNDLE_IDENTIFIER' | awk -F ' = ' '{print $2}' | xargs)
 
         if [ -z "$BUNDLE_ID" ]; then
-            echo "🚨 오류: Xcode 설정에서 PRODUCT_BUNDLE_IDENTIFIER를 찾을 수 없음."
+            echo "🚨 ERROR: Could not extract PRODUCT_BUNDLE_IDENTIFIER from Xcode build settings."
             exit 1
         fi
     fi
 
-    # 최종 번들 ID 검증
-    if [ -z "$BUNDLE_ID" ]; then
-        echo "Error: Bundle identifier not found."
+    # 3️⃣ Validate that the extracted BUNDLE_ID is correct
+    if [[ ! "$BUNDLE_ID" =~ ^com\. ]]; then
+        echo "🚨 ERROR: Invalid Bundle ID: $BUNDLE_ID"
         exit 1
     fi
 
