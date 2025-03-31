@@ -150,6 +150,7 @@ steps:
     </plist>
     EOF
 
+    chmod 644 "$EXPORT_DIR/ExportOptions.plist"
     echo "ExportOptions.plist created with provisioningProfiles and bundle ID."
     cat "$EXPORT_DIR/ExportOptions.plist"  # Output the created plist content for debugging
   displayName: 'Extract Bundle ID and Create ExportOptions.plist'
