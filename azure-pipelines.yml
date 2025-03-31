@@ -191,11 +191,11 @@ steps:
 
 - script: |
     EXPORT_DIR="$(Build.ArtifactStagingDirectory)"
+    IPA_PATH="$EXPORT_DIR/$(APP_NAME).ipa"
     echo "##vso[task.logissue type=warning] EXPORT_DIR: $EXPORT_DIR"
-    ls -l "$EXPORT_DIR/ExportOptions.plist"  # 파일 존재 확인
-    cat "$EXPORT_DIR/ExportOptions.plist"    # 파일 내용 출력
-    stat "$EXPORT_DIR/ExportOptions.plist"   # 파일 권한 확인
-  displayName: 'Verify ExportOptions.plist'
+    ls -l "$EXPORT_DIR  # 파일 존재 확인
+    stat "$IPA_PATH"   # 파일 권한 확인
+  displayName: 'Verify IPA
 
 - script: |
     # Grant execution permission to generate_hash script
