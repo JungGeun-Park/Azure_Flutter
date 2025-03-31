@@ -78,18 +78,14 @@ char appSealingCredential[290];
     return [NSString stringWithUTF8String:ret];
 }
 
-
 +(void)_NotifySwizzlingDetected: (void (^)(NSString*))handler
 {
     dispatch_queue_t queue = dispatch_get_global_queue( DISPATCH_QUEUE_PRIORITY_DEFAULT, 0 );
     dispatch_async( queue, ^{
-        int ret = ObjC_IsSwizzlingDetected();
-        if ( ret == 1 ) // jailbreak detected
-            dispatch_async( dispatch_get_main_queue(), ^{ handler(@"Jailbreak detected !!!"); });
-        if ( ret == 2 ) // swizzling detected
-            dispatch_async( dispatch_get_main_queue(), ^{ handler(@"Swizzling detected !!!"); });
-        if ( ret == 3 ) // hooking detected
-            dispatch_async( dispatch_get_main_queue(), ^{ handler(@"Hooking detected !!!"); });
+        NSArray *messages = @[@"Unknown", @"Jailbreak detected !!!", @"Swizzling detected !!!", @"Hooking detected !!!", @"Cheat tool detected !!!", @"Integrity check failed !!!", @"Abnormal env detected !!!"];
+        int ret = ObjC_IsSwizzlingDetected();        
+        if (ret >= 1 && ret <= 5)
+            dispatch_async( dispatch_get_main_queue(), ^{ handler(messages[ret]); } );
     } );
 }
 

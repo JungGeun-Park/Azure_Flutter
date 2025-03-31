@@ -19,14 +19,6 @@ require 'open-uri'
 require 'rexml/document'
 include REXML
 
-def internet_connection?
-  begin
-    true if open( "http://www.google.com/" )
-  rescue
-    false
-  end
-end
-
 def to_hex_string( param )
     unpacked = param.unpack('H*').first
     unpacked.gsub(/(..)/,'\1').rstrip
@@ -39,7 +31,7 @@ $enc_strings = {}
 LOCAL_TEST = false
 
 
-$baseURL = 'https://tst-api.appsealing.com/covault/gw/'
+$baseURL = 'https://api.appsealing.com/covault/gw/'
 $position = 0
 $isUnreal = false
 $isXamarin = false
@@ -300,12 +292,6 @@ end
 #  문자열 암호화 작업 처리 메인
 #--------------------------------------------------------------------------------------------
 def string_encryption_main()
-
-	#-------------------------------------------------------------------------- check environment
-	if !internet_connection?()
-		puts "error: No internet connection, check network status !"
-		exit( 0 )
-	end
 
 	if $project_path == nil or $project_path == '' or !File.exist?( $project_path )
 		$project_path = File.dirname( File.dirname( __dir__ ))
@@ -1019,7 +1005,8 @@ if __FILE__ == $0
 		system( 'rm "' + app.to_s + '/genesis"' )
 	end
 
-	puts "\n\n1. Payload has extracted from the IPA ..."
+	$current_step += 1
+	puts "\n" + $current_step.to_s + ". Payload has extracted from the IPA ..."
 
 	# Info.plist 파일을 평문으로 변경
 	system( '/usr/libexec/PlistBuddy -x -c \'Print \' "' + app + '/Info.plist" > "' + folder + 'Info.plist"' )
