@@ -89,25 +89,34 @@ steps:
 - script: |
     INFO_PLIST_PATH="$(Build.SourcesDirectory)/ios/Runner/Info.plist"
 
-    # 1️⃣ Extract CFBundleIdentifier from Info.plist
+    # 1. Info.plist에서 직접 추출 시도
     if [ -f "$INFO_PLIST_PATH" ]; then
-        echo "✅ Info.plist found. Extracting CFBundleIdentifier..."
+        echo "Info.plist에서 CFBundleIdentifier 추색 중..."
         BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$INFO_PLIST_PATH" 2>/dev/null)
-    fi
-
-    # 2️⃣ If Info.plist does not contain a valid Bundle ID, extract from Xcode build settings
-    if [ -z "$BUNDLE_ID" ] || [[ "$BUNDLE_ID" == *"PRODUCT_BUNDLE_IDENTIFIER"* ]] || [[ "$BUNDLE_ID" == "NO" ]]; then
-        echo "⚠️  CFBundleIdentifier is invalid in Info.plist. Extracting from Xcode build settings..."
-
-        BUNDLE_ID=$(xcodebuild -workspace "$(Build.SourcesDirectory)/ios/Runner.xcworkspace" \
-                                -scheme Runner \
-                                -showBuildSettings 2>/dev/null | \
-                    grep -m 1 'PRODUCT_BUNDLE_IDENTIFIER' | awk -F ' = ' '{print $2}' | xargs)
-
-        if [ -z "$BUNDLE_ID" ] || [[ "$BUNDLE_ID" == "NO" ]]; then
-            echo "🚨 ERROR: Could not extract a valid PRODUCT_BUNDLE_IDENTIFIER from Xcode build settings."
-            exit 1
+        
+        # 변수 미확인 시 Xcode 빌드 설정에서 추출
+        if [[ "$BUNDLE_ID" == *"$"* ]]; then
+            echo "변수 감지. Xcode 빌드 설정에서 PRODUCT_BUNDLE_IDENTIFIER 검색..."
+            BUNDLE_ID=$(xcodebuild -showBuildSettings \
+                        -project "$(Build.SourcesDirectory)/ios/Runner.xcodeproj" \
+                        -scheme Runner \
+                        -configuration Release \
+                        -sdk iphoneos |
+                        grep -E '^\s*PRODUCT_BUNDLE_IDENTIFIER\s*=' |
+                        awk -F '=' '{print $2}' |
+                        sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
         fi
+    else
+        # 2. Info.plist 없을 경우 Xcode 빌드 설정에서 직접 추출
+        echo "Info.plist 없음. Xcode 빌드 설정에서 추출..."
+        BUNDLE_ID=$(xcodebuild -showBuildSettings \
+                    -project "$(Build.SourcesDirectory)/ios/Runner.xcodeproj" \
+                    -scheme Runner \
+                    -configuration Release \
+                    -sdk iphoneos |
+                    grep -E '^\s*PRODUCT_BUNDLE_IDENTIFIER\s*=' |
+                    awk -F '=' '{print $2}' |
+                    sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     fi
 
     # 최종 검증
