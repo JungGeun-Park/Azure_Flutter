@@ -190,6 +190,14 @@ steps:
   displayName: 'Build and Export IPA'
 
 - script: |
+    EXPORT_DIR="$(Build.ArtifactStagingDirectory)"
+    echo "##vso[task.logissue type=warning] EXPORT_DIR: $EXPORT_DIR"
+    ls -l "$EXPORT_DIR/ExportOptions.plist"  # 파일 존재 확인
+    cat "$EXPORT_DIR/ExportOptions.plist"    # 파일 내용 출력
+    stat "$EXPORT_DIR/ExportOptions.plist"   # 파일 권한 확인
+  displayName: 'Verify ExportOptions.plist'
+
+- script: |
     # Grant execution permission to generate_hash script
     HASH_SCRIPT_PATH="$(Build.SourcesDirectory)/ios/AppSealingSDK/Tools/generate_hash"
     EXPORT_DIR="$(Build.ArtifactStagingDirectory)"
