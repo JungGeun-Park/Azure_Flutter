@@ -159,7 +159,7 @@ steps:
                -sdk iphoneos \
                -configuration 'Release' \
                clean archive \
-               CODE_SIGN_IDENTITY="iPhone Distribution" \
+               CODE_SIGN_IDENTITY="Apple Distribution" \
                CODE_SIGN_STYLE="Manual" \
                DEVELOPMENT_TEAM="${{ parameters.TEAM_ID }}" \
                PROVISIONING_PROFILE_SPECIFIER="${{ parameters.PROVISIONING_PROFILE_NAME }}" \
@@ -176,7 +176,7 @@ steps:
 
 - script: |
     # Grant execution permission to generate_hash script
-    HASH_SCRIPT_PATH="$(Build.SourcesDirectory)/AppSealingSDK/Tools/generate_hash"
+    HASH_SCRIPT_PATH="$(Build.SourcesDirectory)/ios/AppSealingSDK/Tools/generate_hash"
     IPA_PATH="$(Build.ArtifactStagingDirectory)/$(APP_NAME).ipa"
 
     echo "Granting execution permission to generate_hash..."
