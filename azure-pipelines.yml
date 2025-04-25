@@ -4,20 +4,6 @@ trigger:
 pool:
   name: APPSEALING
 
-parameters:
-- name: APPLE_ID
-  type: string
-  default: 'puzznic@inka.co.kr'
-- name: APP_SPECIFIC_PASSWORD
-  type: string
-  default: 'qbrz-hmfz-robj-eohm'
-- name: TEAM_ID
-  type: string
-  default: '22X77ENQ2H'
-- name: PROVISIONING_PROFILE_NAME
-  type: string
-  default: 'AppSealing Wildcard Distribution Profile'
-
 steps:
 - script: |
     # Check if Flutter is installed, if not, install it
@@ -55,10 +41,12 @@ steps:
     security set-keychain-settings -lut 3600 "$KEYCHAIN_PATH"
 
     echo "Importing distribution certificate (PKCS#12) into temporary keychain..."
-    security import "$P12_CERT_PATH" -k "$KEYCHAIN_PATH" -P "123456" -T /usr/bin/codesign
+    security import "$P12_CERT_PATH" -k "$KEYCHAIN_PATH" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
     security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
     security find-identity -v "$KEYCHAIN_PATH"
   displayName: 'Setup Temporary Keychain and Install Certificate'
+  env:
+    CERTIFICATE_PASSWORD: $(CERTIFICATE_PASSWORD)
 
 - script: |
     # Flutter 프로젝트에서 iOS 설정 확인
@@ -141,11 +129,11 @@ steps:
         <key>method</key>
         <string>app-store</string>
         <key>teamID</key>
-        <string>${{ parameters.TEAM_ID }}</string>
+        <string>$TEAM_ID</string>
         <key>provisioningProfiles</key>
         <dict>
             <key>$BUNDLE_ID</key>
-            <string>${{ parameters.PROVISIONING_PROFILE_NAME }}</string>
+            <string>$PROVISIONING_PROFILE_NAME</string>
         </dict>
     </dict>
     </plist>
@@ -154,6 +142,9 @@ steps:
     echo "ExportOptions.plist created with provisioningProfiles and bundle ID."
     cat "$EXPORT_DIR/ExportOptions.plist"  # Output the created plist content for debugging
   displayName: 'Extract Bundle ID and Create ExportOptions.plist'
+  env:
+    TEAM_ID: $(TEAM_ID)
+    PROVISIONING_PROFILE_NAME: $(PROVISIONING_PROFILE_NAME)
 
 - script: |
     # Define paths for Flutter iOS build
@@ -176,8 +167,8 @@ steps:
                clean archive \
                CODE_SIGN_IDENTITY="Apple Distribution" \
                CODE_SIGN_STYLE="Manual" \
-               DEVELOPMENT_TEAM="${{ parameters.TEAM_ID }}" \
-               PROVISIONING_PROFILE_SPECIFIER="${{ parameters.PROVISIONING_PROFILE_NAME }}" \
+               DEVELOPMENT_TEAM="$TEAM_ID" \
+               PROVISIONING_PROFILE_SPECIFIER="$PROVISIONING_PROFILE_NAME" \
                -archivePath "$ARCHIVE_PATH"
 
     # Export IPA file
@@ -188,6 +179,9 @@ steps:
 
     echo "IPA successfully exported: $IPA_PATH"
   displayName: 'Build and Export IPA'
+  env:
+    TEAM_ID: $(TEAM_ID)
+    PROVISIONING_PROFILE_NAME: $(PROVISIONING_PROFILE_NAME)
 
 - script: |
     # Grant execution permission to generate_hash script
@@ -206,8 +200,11 @@ steps:
     EXPORT_DIR="$(Build.ArtifactStagingDirectory)"
     IPA_PATH=$(find "$EXPORT_DIR" -type f -name "*.ipa" | head -n 1)
     set -x
-    xcrun altool --upload-app -f "$IPA_PATH" -t ios -u "${{ parameters.APPLE_ID }}" -p "${{ parameters.APP_SPECIFIC_PASSWORD }}"
+    xcrun altool --upload-app -f "$IPA_PATH" -t ios -u "$APPLE_ID" -p "$APP_SPECIFIC_PASSWORD"
   displayName: 'Upload to TestFlight'
+  env:
+    APPLE_ID: $(APPLE_ID)
+    APP_SPECIFIC_PASSWORD: $(APP_SPECIFIC_PASSWORD)
 
 - script: |
     echo "Deleting temporary keychain..."
