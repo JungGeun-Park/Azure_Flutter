@@ -35,12 +35,18 @@
 #define CFSTR(cStr)  __CFStringMakeConstantString( cStr )
 
 extern void Appsealing(void);
+#ifdef __cplusplus
+extern "C" {
+#endif
 extern int ObjC_IsAbnormalEnvironmentDetected();
 extern int ObjC_IsSwizzlingDetected();
 extern int ObjC_IsSwizzlingDetectedReturn();
 extern int ObjC_GetAppSealingDeviceID( char* deviceIDBuff );
 extern int ObjC_GetEncryptedCredential( char* buffer );
 extern char* ObjC_DecryptString( char* string );
+#ifdef __cplusplus
+}
+#endif
 
 @interface AppSealingInterface : NSObject
 - ( int )_IsAbnormalEnvironmentDetected;

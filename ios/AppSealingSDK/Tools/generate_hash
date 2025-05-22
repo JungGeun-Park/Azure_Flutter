@@ -2,7 +2,7 @@
 
 =begin
 ============================================================================================
-|  AppSealing iOS SDK Hash Generator V1.10.0                                                |
+|  AppSealing iOS SDK Hash Generator V1.11.0.0                                             |
 |                                                                                          |
 |  * presented by Inka Entworks                                                            |
 ============================================================================================
@@ -17,6 +17,10 @@ require 'io/console'
 require 'xcodeproj'
 require 'open-uri'
 require 'rexml/document'
+require 'fileutils'
+require 'shellwords'
+require 'find'
+
 include REXML
 
 def to_hex_string( param )
@@ -31,7 +35,7 @@ $enc_strings = {}
 LOCAL_TEST = false
 
 
-$baseURL = 'https://api.appsealing.com/covault/gw/'
+$baseURL = 'https://tst-api.appsealing.com/covault/gw/'
 $position = 0
 $isUnreal = false
 $isXamarin = false
@@ -41,703 +45,1053 @@ $Entitlements = ''
 #--------------------------------------------------------------------------------------------
 #  소스 코드 파일 내의 태깅 된 문자열 추출
 #--------------------------------------------------------------------------------------------
-def extract_tagged_strings( path )
-
+def extract_tagged_strings(path)
     result = []
+    return result if path.end_with?("AppsealingiOS.mm")
 
-    if path.end_with?( "AppsealingiOS.mm" )
-        return result
-    end
-	
-    #puts "\n\n----------------------------- Extracting : " + path
+    puts "    [INFO] Processing file: #{path}".cyan
 
     begin
-		file = File.open( path, "r:UTF-8" )
-		file.each_line do |line|
-            pos = line.index( '\\0x1\\0x1\\0x1\\0x1"' )
-            next if pos == nil
-            target_line = line
-            loop do
-                pos = target_line.index( '\\0x1\\0x1\\0x1\\0x1"' )
-                break if pos == nil
-                end_pos = pos - 1
-                while pos > 1 do
-                    pos -= 1
-                    next if target_line[pos - 1..pos - 1] != '"'
-                    break if target_line[pos - 2..pos - 2] == '@' and path.end_with?( ".m", ".mm" )
-                    break if target_line[pos - 2..pos - 2] != '\\'
-                end
-                string = target_line[pos..end_pos]
-				#puts ' >> found : ' + string
-                result << string.unpack( 'H*' )[0]
-                target_line = target_line[( end_pos + 18 )..-1]
-            end
-		end
-	rescue => e
-		puts "error: " +  e.to_s + ".\n.\nInvalid source code file has passed to an argument, check file path and try again.\n.\n.\n"
-		exit( 0 )
-	ensure
-		file.close unless file.nil?
-	end
-    #puts ' >>> FOUND : ' + result.to_s
+        # 파일 인코딩 처리 강화 (UTF-8, ASCII-8BIT)
+        content = File.read(path, mode: "rb", encoding: "ASCII-8BIT").scrub
+        matches = content.scan(/("(?:\\"|[^"])*\\0x1\\0x1\\0x1\\0x1")/).flatten
 
-    return result    
-end
+        matches.each do |match|
+            # 유효성 검사: 최소 길이 20자(예: "abc\x01..." + 16바이트 태그)
+            next unless match.bytesize >= 20
 
+            # 이스케이프 처리 제거
+            clean_str = match.gsub(/\\0x1\\0x1\\0x1\\0x1"$/, '')[1..-1]
+            hex_str = clean_str.unpack1('H*')
+            
+            puts "    [DEBUG] Found tagged string: #{clean_str} : #{hex_str[0..20]}...".yellow
+            result << hex_str
+        end
 
-#--------------------------------------------------------------------------------------------
-#  appsealing.lic 파일 읽기
-#--------------------------------------------------------------------------------------------
-def get_accountID_hash_from_license_file( path )
-	license = File.open( path, "r+b" )
+        puts "    [INFO] Found #{result.size} valid tagged strings"
+    rescue EncodingError => e
+        puts "    [ERROR] Encoding error in #{path}: #{e}".red
+        exit(1)
+    rescue => e
+        puts "    [ERROR] Critical error processing #{path}: #{e}".red
+        puts "           Check file syntax or special characters".red
+        exit(1)
+    end
 
-	header = license.read( 5 )
-	magic = "\x41\x53\x4C\x46\x76".force_encoding( Encoding::ASCII_8BIT )	#V2 +
-	if header == magic then
-		license.read( 3 )
-		license.read( 48 )
-		license.read( 8 )
-		
-        # account ID hash 추출
-		accountIDhash = license.read( 32 ).unpack( 'c*' )
-		$account_id_hash = accountIDhash.pack( 'c*' ).unpack( 'H*' ).first
-	end
+    result
 end
 
 
 #--------------------------------------------------------------------------------------------
 #  문자열 암호화
 #--------------------------------------------------------------------------------------------
-def get_encrypted_strings( path, param )
+def get_encrypted_strings(path, param)
+    require 'securerandom'
+    require 'openssl'
+    require 'json'
+    require 'net/http'
+    require 'uri'
 
     enc_strings_map = {}
 
-    $account_id_hash = get_accountID_hash_from_license_file( path + '/AppSealingSDK/Libraries/appsealing.lic' )
+    lic_path = File.join(path, 'AppSealingSDK', 'Libraries', 'appsealing.lic')
+    get_accountID_hash_from_license_file(lic_path)
+    puts "    [INFO] Loaded account_id_hash: #{$account_id_hash}".cyan
 
-    if LOCAL_TEST then
-        $iv = SecureRandom.hex( 16 ).upcase
-        $aes_key = SecureRandom.hex( 16 ).upcase
+    if LOCAL_TEST
+        $iv = SecureRandom.hex(16).upcase
+        $aes_key = SecureRandom.hex(16).upcase
+        puts "    [INFO] LOCAL_TEST enabled - Using random AES key/IV".cyan
 
-        #puts '### AES IV : ' + $iv.to_s
-        #puts '### AES Key : ' + $aes_key.to_s
-
-        param.each { |string|
-            # encrypt with AES
-            aes = OpenSSL::Cipher::AES.new( "128-CTR" )
-            aes.encrypt
-            aes.key = [$aes_key].pack( 'H*' )
-            aes.iv = [$iv].pack( 'H*' )
-            enc = aes.update( string ) + aes.final
-            key = to_hex_string( string ).upcase
-            enc_strings_map[key] = to_hex_string( enc ).upcase
-        }
+        param.each do |string|
+            begin
+                aes = OpenSSL::Cipher::AES.new("128-CTR")
+                aes.encrypt
+                aes.key = [$aes_key].pack('H*')
+                aes.iv = [$iv].pack('H*')
+                enc = aes.update(string) + aes.final
+                key = to_hex_string(string).upcase
+                enc_strings_map[key] = to_hex_string(enc).upcase
+            rescue => e
+                puts "    [ERROR] AES encryption failed for string: #{string[0..10]}... (#{e})".red
+            end
+        end
+        puts "    [INFO] Local encryption complete: #{enc_strings_map.size} strings".cyan
     else
-
-        uri = URI( $baseURL + 'v3/sdk/requestStringEncryptionForIOS' )
+        uri = URI(File.join($baseURL, 'v3/sdk/requestStringEncryptionForIOS'))
 
         begin
-			request = Net::HTTP::Post.new( uri )
-			form_data =
-			[
-				['bundle_id', $bundle_id],
-				['account_id_hash', $account_id_hash],
-				['strings', param.join( ',' )]
-			]
-			request.set_form form_data, 'multipart/form-data'
-			response = Net::HTTP.start( uri.hostname, uri.port, use_ssl: uri.scheme == 'https' ) do |http|
-				http.request( request )
-			end
-            result = JSON.parse( response.body )
-            code = result['result']['code']
-            message = result['result']['message']
+            puts "    [INFO] Requesting string encryption from AppSealing server...".cyan
+            request = Net::HTTP::Post.new(uri)
+            form_data = [
+                ['bundle_id', $bundle_id],
+                ['account_id_hash', $account_id_hash],
+                ['strings', param.join(',')]
+            ]
+            request.set_form form_data, 'multipart/form-data'
+            response = Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == 'https') do |http|
+                http.request(request)
+            end
+            result = JSON.parse(response.body)
+            code = result.dig('result', 'code')
+            message = result.dig('result', 'message')
 
-            if code != '0000' then
-                puts "error: " + message + "\nIf this error occurs continuously, contact AppSealing Help Center.\n.\n.\n"
-                exit( 0 )
+            if code != '0000'
+                puts "    [ERROR] AppSealing server error: #{message}".red
+                puts "           If this error occurs continuously, contact AppSealing Help Center.".red
+                exit(1)
             end
 
-            # 암호화 키 및 Exported 키 추출
             $iv = result['iv']
             $lea_key_table = result['lea_key_table']
             enc_strings_map = result['encrypted_strings']
-            #puts enc_strings_map
+            puts "    [INFO] Server encryption complete: #{enc_strings_map.size} strings".cyan
         rescue => e
-            puts "error: Cannot connect to AppSealing server or bad response, check your network status and try again.\n[Error] " + e.to_s + "\nIf this error occurs continuously, contact AppSealing Help Center.\n.\n.\n"
-            exit( 0 )
+            puts "    [ERROR] Cannot connect to AppSealing server or bad response.".red
+            puts "           [Error] #{e}".red
+            puts "           If this error occurs continuously, contact AppSealing Help Center.".red
+            exit(1)
         end
     end
 
-    modified_source = ""
-    line_add = true
-    file = File.open( path + '/AppSealingSDK/Libraries/AppsealingiOS.mm' )
-    file.each_line { |line|
-        if line.strip.end_with?( '///// LEA AREA END : DO NOT DELETE THIS LINE !!!!' )
-            line_add = true
-            modified_source += line
-            next
-        end
-        if !line.strip.end_with?( '///// LEA AREA BEGIN : DO NOT DELETE THIS LINE !!!!' )
-            modified_source += line if line_add
-            next
-        end
+	# AppsealingiOS.mm 수정
+	mm_path = File.join(path, 'AppSealingSDK', 'Libraries', 'AppsealingiOS.mm')
+	unless File.exist?(mm_path)
+		puts "    [ERROR] Cannot find AppsealingiOS.mm: #{mm_path}".red
+		exit(1)
+	end
 
-        #puts "----------------------------- Processing : " + path + '/AppSealingSDK/Libraries/AppsealingiOS.mm'
+	puts "    [INFO] Modifying AppsealingiOS.mm...".cyan
 
-        modified_source += line
-        iv_string = "unsigned char __se_iv[16] = { ";
-        for i in 0 ... 16
-            iv_string += ( '0x' + $iv[( i * 2 )..( i * 2 + 1 )] + ',' )
-        end
-        modified_source += ( iv_string[0..( iv_string.length - 1)] + " };\n" )
+	begin
+		# 1. 백업 파일 생성
+		backup_path = "#{mm_path}.bak"
+		FileUtils.cp(mm_path, backup_path)
+		puts "    [INFO] Backup created: #{backup_path}".cyan
 
-        if LOCAL_TEST
-            modified_source += "bool __se_use_lea = false;\n"
-            modified_source += "unsigned char __se_key_table[248620];\n"
-            key_string = "unsigned char __se_key[16] = { ";
-            for i in 0 ... 16
-                key_string += ( '0x' + $aes_key[( i * 2 )..( i * 2 + 1 )] + ',' )
-            end
-            modified_source += ( key_string[0..( key_string.length - 1)] + " };\n" )
-        else
-            modified_source += "bool __se_use_lea = true;\n"
-            modified_source += "unsigned char __se_key[16];\n"
-            key_string = "unsigned char __se_key_table[248620] = { ";
-            for i in 0 ... 248620
-                key_string += ( '0x' + $lea_key_table[( i * 2 )..( i * 2 + 1 )] + ',' )
-            end
-            modified_source += ( key_string[0..( key_string.length - 1)] + " };\n" )
-        end
-        line_add = false
-    }
+		# 2. 파일 수정
+		modified_source = []
+		line_add = true
 
-    file = File.open( path + '/AppSealingSDK/Libraries/AppsealingiOS.mm', "w+" )
-    file.write modified_source
-    file.close unless file.nil?
+		File.foreach(mm_path, chomp: true) do |line|
+			if line.strip.end_with?('///// LEA AREA END : DO NOT DELETE THIS LINE !!!!')
+				line_add = true
+				modified_source << line
+				next
+			end
 
-    return enc_strings_map
+			unless line.strip.end_with?('///// LEA AREA BEGIN : DO NOT DELETE THIS LINE !!!!')
+				modified_source << line if line_add
+				next
+			end
+
+			# 3. 신규 코드 블록 생성
+			modified_source << line
+			modified_source << "unsigned char __se_iv[16] = { #{generate_c_array($iv, 16)} };"
+			modified_source << "bool __se_use_lea = #{LOCAL_TEST ? 'false' : 'true'};"
+
+			if LOCAL_TEST
+				modified_source << "unsigned char __se_key_table[248620];"
+				modified_source << "unsigned char __se_key[16] = { #{generate_c_array($aes_key, 16)} };"
+			else
+				modified_source << "unsigned char __se_key[16];"
+				modified_source << "unsigned char __se_key_table[248620] = { #{generate_c_array($lea_key_table, 248620)} };"
+			end
+
+			line_add = false
+		end
+
+		# 4. 원자적 쓰기 (임시 파일 -> 원본 파일)
+		temp_path = "#{mm_path}.tmp"
+		File.write(temp_path, modified_source.join("\n"))
+		File.rename(temp_path, mm_path)
+		puts "    [INFO] AppsealingiOS.mm updated successfully.".cyan
+
+	rescue => e
+		# 5. 에러 발생 시 백업 복원
+		puts "    [ERROR] Failed to update AppsealingiOS.mm: #{e}".red
+		if File.exist?(backup_path)
+			FileUtils.cp(backup_path, mm_path)
+			puts "    [INFO] Restored original file from backup.".cyan
+		end
+		exit(1)
+	end
+
+    enc_strings_map
 end
-
+def generate_c_array(hex_str, expected_size)
+    bytes = hex_str.scan(/../)
+    if bytes.size != expected_size
+        raise "Invalid hex string size: expected #{expected_size}, got #{bytes.size}"
+    end
+    bytes.map { |b| "0x#{b}" }.join(', ')
+end
 
 #--------------------------------------------------------------------------------------------
 #  문자열 교체
 #--------------------------------------------------------------------------------------------
-def replace_tagged_strings( path )
+def replace_tagged_strings(path)
+    puts "    [INFO] Processing file: #{path}".cyan
 
-    #puts "----------------------------- Replacing : " + path
-
-    modified_source = ""
-	if path.end_with?( ".m", ".mm" )
-		modified_source = "#import \"AppsealingiOS.h\"\n"
-	end
+    # 백업 생성
+    backup_path = "#{path}.bak"
+    FileUtils.cp(path, backup_path)
+    puts "    [DEBUG] Backup created: #{backup_path}".yellow
 
     begin
-        file = File.open( path, "r:UTF-8" )
-        file.each_line { |line|
-            pos = line.index( '\\0x1\\0x1\\0x1\\0x1"')
-            if pos == nil
-                modified_source += line
+        content = File.read(path, encoding: 'UTF-8')
+        modified = content.dup
+        tag = '\\0x1\\0x1\\0x1\\0x1"'
+        index = 0
+        replacement_count = 0
+
+        # 전체 내용에서 태그 검색
+        while (index = modified.index(tag, index))
+            puts "    [DEBUG] Found tag at position: #{index}".yellow
+
+            # 문자열 시작 위치 찾기
+            start_pos = index - 1
+            while start_pos >= 0
+                break if modified[start_pos] == '"' && (start_pos == 0 || modified[start_pos-1] != '\\')
+                start_pos -= 1
+            end
+
+            if start_pos < 0
+                puts "    [WARN] Invalid string format before tag at #{index}".yellow
+                index += tag.length
                 next
             end
 
-            target_line = line
-            loop do
-                pos = target_line.index( '\\0x1\\0x1\\0x1\\0x1"')
-                break if pos == nil
-    
-                end_pos = pos - 1
-                while pos > 1 do
-                    pos -= 1
-                    next if target_line[pos - 1..pos - 1] != '"'
-                    break if target_line[pos - 2..pos - 2] == '@' and path.end_with?( ".m", ".mm" )
-                    break if target_line[pos - 2..pos - 2] != '\\'
-                end
-                string = target_line[pos..end_pos]
-                key = to_hex_string( string ).downcase
-				#puts '  >> [' + key + '] ' + string
-                if path.end_with?( ".m", ".mm" )
-                    if target_line[pos - 2..pos - 2] == '@'
-                        target_line.sub!( '@"' + string + '\\0x1\\0x1\\0x1\\0x1"', '[AppSealingInterface _DSS:@"' + $enc_strings[key] + '"]' )
-                    else
-                        target_line.sub!( '"' + string + '\\0x1\\0x1\\0x1\\0x1"', '[[AppSealingInterface _DSC:"' + $enc_strings[key] + '"] UTF8String]' )
-                    end
-                else
-                    target_line.sub!( '"' + string + '\\0x1\\0x1\\0x1\\0x1"', 'String(AppSealingInterface._DSS("' + $enc_strings[key] + '"))' )
-                end
-            end
-            modified_source += target_line
-        }
+            # 문자열 추출
+            original_str = modified[start_pos+1...index]
+            hex_key = original_str.unpack1('H*').downcase
+            puts "    [DEBUG] Original string: #{original_str[0..50]}...".yellow
+            puts "    [DEBUG] Hex key: #{hex_key[0..24]}...".yellow
 
-        file = File.open( path, "w+:UTF-8" )
-        file.write modified_source
-        file.close unless file.nil?
+            unless $enc_strings[hex_key]
+                puts "    [WARN] Missing encryption key for: #{hex_key[0..24]}...".yellow
+                index += tag.length
+                next
+            end
+
+            # 치환 문자열 생성
+            replacement = if path.end_with?('.m', '.mm')
+                            modified[start_pos-1] == '@' ? 
+                            "[AppSealingInterface _DSS:@\"#{$enc_strings[hex_key]}\"]" :
+                            "[[AppSealingInterface _DSC:@\"#{$enc_strings[hex_key]}\"] UTF8String]"
+                          else
+                            "String(AppSealingInterface._DSS(\"#{$enc_strings[hex_key]}\"))"
+                          end
+
+            # 치환 적용
+            modified[start_pos..index+tag.length-1] = replacement
+            replacement_count += 1
+            puts "    [DEBUG] Replaced with: #{replacement[0..50]}...".yellow
+            index = start_pos + replacement.length # 다음 검색 위치 조정
+        end
+
+        # 변경 사항 확인
+        if replacement_count == 0
+            puts "    [WARN] No tagged strings found in #{path}".yellow
+            return
+        end
+
+        # 원자적 쓰기
+        temp_path = "#{path}.tmp"
+        File.write(temp_path, modified)
+        File.rename(temp_path, path)
+        puts "    [INFO] Successfully replaced #{replacement_count} strings".green
 
     rescue => e
-        puts "error: " + e.to_s + ".\n.\nInvalid source code file has passed to an argument, check file path and try again.\n.\n.\n"
-        exit( 0 )
+        puts "    [ERROR] Critical error: #{e}".red
+        FileUtils.cp(backup_path, path) if File.exist?(backup_path)
+        exit(1)
     ensure
-        file.close unless file.nil?
-    end            
+        FileUtils.rm_f(temp_path) rescue nil
+    end
 end
 
 #--------------------------------------------------------------------------------------------
 #  원본 코드 복원
 #--------------------------------------------------------------------------------------------
-def restore_original_code( path )
-    return if !File.exist?( path + '.org' )
-    puts '## Restore : ' + path + '.org ==> ' + path
-    system( 'mv "' + path + '.org" "' + path + '"' )
+def restore_original_code(path)
+    backup_path = "#{path}.org"
+    
+    unless File.exist?(backup_path)
+        puts "    [WARN] Backup file not found: #{backup_path}".yellow
+        return
+    end
+
+    begin
+        puts "    [INFO] Restoring original file: #{backup_path} => #{path}".cyan
+        
+        # 1. 원자적 복구 (임시 파일 사용)
+        temp_path = "#{path}.tmp"
+        FileUtils.mv(path, temp_path) if File.exist?(path)  # 현재 파일 임시 이동
+        FileUtils.mv(backup_path, path)                     # 백업 → 원본
+        
+        # 2. 임시 파일 정리
+        FileUtils.rm_f(temp_path) rescue nil
+        
+        puts "    [INFO] Successfully restored: #{path}".green
+        
+        # 3. 백업 파일 삭제 (선택적)
+        FileUtils.rm_f(backup_path)
+        puts "    [DEBUG] Removed backup: #{backup_path}".cyan
+
+    rescue => e
+        puts "    [ERROR] Restore failed: #{e}".red
+        
+        # 4. 복구 시도: 임시 파일 → 원본
+        if File.exist?(temp_path)
+            FileUtils.mv(temp_path, path)
+            puts "    [INFO] Recovered original state".cyan
+        end
+        
+        exit(1)
+    end
 end
 
 #--------------------------------------------------------------------------------------------
 #  문자열 암호화 작업 처리 메인
 #--------------------------------------------------------------------------------------------
 def string_encryption_main()
+    puts "================================================================================== String Encryption".cyan
 
-	if $project_path == nil or $project_path == '' or !File.exist?( $project_path )
-		$project_path = File.dirname( File.dirname( __dir__ ))
-	end
-	if !File.exist?( $project_path )
-		puts "error: Invalid project path : " + $project_path
-		exit( 0 )
-	end
+    # 1. 프로젝트 경로 확인
+    if $project_path.nil? || $project_path.empty? || !File.exist?($project_path)
+        $project_path = File.dirname(File.dirname(__dir__))
+        puts "    [INFO] Auto-set project path to: #{$project_path}".cyan
+    end
+    unless File.exist?($project_path)
+        puts "    [ERROR] Invalid project path: #{$project_path}".red
+        exit(1)
+    end
 
-	xcodeproj = Dir[$project_path + '/**/*.xcodeproj']
-	if xcodeproj == nil || xcodeproj.length < 1
-		puts "error: Cannon find Xcode project file in : " + $project_path
-		exit( 0 )
-	end
+    # 2. Xcode 프로젝트 찾기
+    xcodeproj = Dir[$project_path + '/**/*.xcodeproj']
+    if xcodeproj.nil? || xcodeproj.empty?
+        puts "    [ERROR] Cannot find Xcode project file in: #{$project_path}".red
+        exit(1)
+    end
 
-	#-------------------------------------------------------------------------- open Xcode project
-	begin
-		project = Xcodeproj::Project.open( xcodeproj[0] )
-	rescue => e
-		puts "!!! Can't open project : " + e.to_s
-	end
+    # 3. Xcode 프로젝트 열기
+    begin
+        puts "    [INFO] Opening Xcode project: #{xcodeproj[0]}".cyan
+        project = Xcodeproj::Project.open(xcodeproj[0])
+    rescue => e
+        puts "    [ERROR] Can't open project: #{e}".red
+        exit(1)
+    end
 
-	if project.targets.length < 1
-		puts "error: There is no target in Xcode project : " + xcodeproj[0]
-		exit( 0 )
-	end
+    if project.targets.empty?
+        puts "    [ERROR] No target in Xcode project: #{xcodeproj[0]}".red
+        exit(1)
+    end
 
-	target = project.targets.first
-	if target == ''
-		puts "error: Target name is empty : " + xcodeproj[0]
-		exit( 0 )
-	end
+    target = project.targets.first
+    if target.nil? || target == ''
+        puts "    [ERROR] Target name is empty: #{xcodeproj[0]}".red
+        exit(1)
+    end
 
-	#puts '### Process : ' + target.to_s
+    puts "    [INFO] Processing target: #{target}".cyan
 
-	#-------------------------------------------------------------------------- check AppSealing SDK
-	if !File.exist?( $project_path + '/AppSealingSDK/Libraries/appsealing.lic' )
-		puts "error: Cannon find AppSealing license file, check AppSealing SDK files : " + $project_path
-		exit( 0 )
-	end
-	if !File.exist?( $project_path + '/AppSealingSDK/Libraries/AppsealingiOS.mm' )
-		puts "error: Cannon find AppsealingiOS.mm interface file, check AppSealing SDK files : " + $project_path
-		exit( 0 )
-	end
+    # 4. AppSealing SDK 파일 확인
+    unless File.exist?($project_path + '/AppSealingSDK/Libraries/appsealing.lic')
+        puts "    [ERROR] Cannot find AppSealing license file. Check AppSealing SDK files: #{$project_path}".red
+        exit(1)
+    end
+    unless File.exist?($project_path + '/AppSealingSDK/Libraries/AppsealingiOS.mm')
+        puts "    [ERROR] Cannot find AppsealingiOS.mm interface file. Check AppSealing SDK files: #{$project_path}".red
+        exit(1)
+    end
 
+    # 5. Bundle ID 추출
+    $bundle_id = target.build_configurations.first.build_settings['PRODUCT_BUNDLE_IDENTIFIER']
+    if $bundle_id.nil? || $bundle_id.empty?
+        puts "    [ERROR] Cannot extract bundle ID from: #{target}".red
+        exit(1)
+    end
+    puts "    [INFO] Bundle ID: #{$bundle_id}".cyan
 
-	#-------------------------------------------------------------------------- get bundle ID
-	$bundle_id = target.build_configurations.first.build_settings['PRODUCT_BUNDLE_IDENTIFIER']
-	if $bundle_id == nil or $bundle_id == ''
-		puts "error: Cannot extract bundle ID from : " + target
-		exit( 0 )
-	end
+    # 6. 컴파일 소스 파일 찾기
+    files = []
+    begin
+        files = target.source_build_phase.files.to_a.map { |pbx_build_file| pbx_build_file.file_ref.real_path.to_s }
+    rescue => e
+        puts "    [ERROR] Failed to get source files: #{e}".red
+        exit(1)
+    end
+    sources = files.select { |path| path.end_with?('.m', '.mm', '.swift') }
+    if sources.empty?
+        puts "    [ERROR] No source files to compile in target: #{target}".red
+        exit(1)
+    end
+    puts "    [INFO] Found #{sources.size} source files.".cyan
 
-	#-------------------------------------------------------------------------- find compiled source files
-	files = target.source_build_phase.files.to_a.map { |pbx_build_file| pbx_build_file.file_ref.real_path.to_s }
-	sources = files.select { |path| path.end_with?( '.m', '.mm', '.swift' ) }
-	if sources.length < 1
-		puts "error: There is no source files to compile : " + target
-		exit( 0 )
-	end
+    # 7. 소스 파일 처리
+    sources.each do |path|
+        unless File.exist?(path)
+            puts "    [WARN] Source file does not exist: #{path}".yellow
+            next
+        end
 
-	sources.select { |path|
-		next if !File.exist?( path )
-		if $action == 'restore'
-			$source_path << path
-			next
-		end
-		#-------------------------------------------------------------------------- extract strings to be encrypted
-		strings = extract_tagged_strings( path )
-		next if strings.length == 0
-		strings.each { |string| $request_param << string }
-		$source_path << path
-	}
+        if $action == 'restore'
+            $source_path << path
+            puts "    [INFO] Added to restore list: #{path}".cyan
+            next
+        end
 
-	#-------------------------------------------------------------------------- encrypt strings
-	if $action != "restore" and $request_param.length > 0
-		$enc_strings = get_encrypted_strings( $project_path, $request_param )
-		#puts $enc_strings
-	end
+        begin
+            strings = extract_tagged_strings(path)
+        rescue => e
+            puts "    [WARN] Failed to extract tagged strings from #{path}: #{e}".yellow
+            next
+        end
 
-	#-------------------------------------------------------------------------- replace / restore
-	$source_path.each do |file, string_list|
+        if strings.empty?
+            puts "    [INFO] No tagged strings found in: #{path}".cyan
+            next
+        end
 
-		if $action == "restore"
-			restore_original_code( file )
-		else
-			# backup original code
-			system( 'cp "' + file + '" "' + file + '.org"' )
-			replace_tagged_strings( file )
-		end
-	end
+        puts "    [INFO] Found #{strings.size} tagged strings in: #{path}"
+        strings.each { |string| $request_param << string }
+        $source_path << path
+    end
+
+    # 8. 문자열 암호화
+    if $action != "restore" && $request_param.length > 0
+        begin
+            puts "    [INFO] Encrypting #{ $request_param.length } strings...".cyan
+            $enc_strings = get_encrypted_strings($project_path, $request_param)
+            puts "    [INFO] Encrypted strings ready.".cyan
+        rescue => e
+            puts "    [ERROR] String encryption failed: #{e}".red
+            exit(1)
+        end
+    end
+
+    # 9. 소스 파일 백업 및 치환/복원
+    $source_path.each do |file|
+        unless File.exist?(file)
+            puts "    [WARN] Source file not found for replace/restore: #{file}".yellow
+            next
+        end
+
+        if $action == "restore"
+            begin
+                puts "    [INFO] Restoring original code: #{file}".cyan
+                restore_original_code(file)
+            rescue => e
+                puts "    [ERROR] Restore failed for #{file}: #{e}".red
+            end
+        else
+            begin
+                backup_file = "#{file}.org"
+                FileUtils.cp(file, backup_file)
+                puts "    [INFO] Backup created: #{backup_file}".cyan
+                replace_tagged_strings(file)
+                puts "    [INFO] Replaced tagged strings in: #{file}".cyan
+            rescue => e
+                puts "    [ERROR] Replace failed for #{file}: #{e}".red
+            end
+        end
+    end
+
+    puts "    [INFO] String encryption process completed.".cyan
 end
+
 
 #--------------------------------------------------------------------------------------------
 #  _CodeSignature/CodeResources 파일을 읽어 <key>files</key> 항목의 모든 데이터를 문자열로 변환하여 리턴
 #--------------------------------------------------------------------------------------------
-def generate_hash_snapshot( path )
+def generate_hash_snapshot(path)
+    puts "    [INFO] Generating hash snapshot for: #{path}".cyan
 
-	dict = false
-	data = false
-	key = ''
-	expect_data = false
-	snapshot = ""
+    snapshot = ""
+    state = :initial # 상태 기계: :initial, :expect_data, :in_dict, :in_data
+    current_key = nil
+    line_number = 0
 
-	# begin
-		file = File.open( path )
-		file.each_line do |line|
-			sline = line.strip
-			break if sline.start_with?( "<key>files2</key>" )	# files2 항목은 건너 뛴다
-			if sline.start_with?( "<key>files</key>" )
-				next
-			end
+    begin
+        File.foreach(path, mode: 'r:UTF-8', chomp: true).with_index do |line, idx|
+            line_number = idx + 1
+            stripped_line = line.strip
 
-			if !expect_data and sline.start_with?( "<key>" ) and sline.end_with?( "</key>" )	# key 추출
-				key = sline.gsub( "<key>", "" ).gsub( "</key>", "" )
-				expect_data = true
-				snapshot += ( key + "\1" )	# 스냅샷에 추가
-			end
-			dict = true if sline.start_with?( "<dict>" ) and expect_data
-			dict = expect_data = false if sline.start_with?( "</dict>" ) and dict and expect_data
-			if sline.start_with?( "<data>" ) and expect_data
-				data = true
-				next
-			end
-			if sline.start_with?( "</data>" )
-				data = false;
-				expect_data = false if !dict
-			end
-			if expect_data and data
-				snapshot += ( sline + "\n" )	# 스냅샷에 추가
-				next
-			end
-		end
-	# rescue => e
-	# 	puts ".\n.\nInvalid IPA file has passed to an argument, check your IPA file and try again.\n.\n.\n"
-	# 	exit( false )
-	# ensure
-		file.close unless file.nil?
-	# end
-	return snapshot
+            # files2 항목 건너뛰기
+            if stripped_line.start_with?("<key>files2</key>")
+                break
+            end
+
+            case state
+            when :initial
+                if stripped_line == "<key>files</key>"
+                    state = :expect_dict
+                end
+
+            when :expect_dict
+                if stripped_line == "<dict>"
+                    state = :in_dict
+                end
+
+            when :in_dict
+                if stripped_line.start_with?("<key>") && stripped_line.end_with?("</key>")
+                    current_key = stripped_line[5...-6] # <key>...</key> 추출
+                    state = :expect_data
+                    snapshot << "#{current_key}\1"
+                elsif stripped_line == "</dict>"
+                    state = :initial
+                end
+
+            when :expect_data
+                if stripped_line == "<dict>"
+                    state = :in_nested_dict
+                    puts "    [WARN] Nested dict detected for key #{current_key}, skipping".yellow
+                elsif stripped_line == "<data>"
+                    state = :in_data
+                end
+
+            when :in_nested_dict
+                state = :expect_data if stripped_line == "</dict>"
+
+            when :in_data
+                if stripped_line == "</data>"
+                    state = :in_dict
+                    snapshot << "\n"
+                else
+                    snapshot << "#{stripped_line}\n"
+                end
+            end
+        end
+
+        puts "    [INFO] Snapshot generated successfully. Size: #{snapshot.bytesize} bytes".green
+        snapshot
+
+    rescue => e
+        puts "    [ERROR] Failed to parse file at line #{line_number}: #{e.message}".red
+        puts "           Ensure the input file is a valid IPA/Info.plist".red
+        puts "           [DEBUG] Current state: #{state}, Key: #{current_key}".yellow
+        exit(1)
+    end
 end
 
 #--------------------------------------------------------------------------------------------
 #  Payload/app의 certificate와 entitlement를 이용하여 genesis가 추가된 Payload/app에 다시 codesign을 수행
 #--------------------------------------------------------------------------------------------
-def sign_app_payload( _app, folder, generate_info_only )
-	cert = ''
-	app = '"' + _app + '"'
-	begin
-		# 1 app 서명에 사용된 인증서 추출
-		system( "cd " + folder + ";codesign -d --extract-certificates " + app )
+require 'open3'
+def sign_app_payload(_app, _folder, generate_info_only)
+    cert = ''
+    app = File.expand_path(_app)
+    folder = File.expand_path(_folder) + "/"
 
-		cmd = "openssl x509 -inform DER -in " + folder + "codesign0 -noout -nameopt multiline"
+    begin
+        # 0. Pre-checks
+        puts "    [INFO] Verifying directory structure...".cyan
+        raise "Directory does not exist (#{folder})" unless Dir.exist?(folder)
+        raise "App path does not exist (#{app})" unless Dir.exist?(app)
+        puts "    [SUCCESS] Directory validation passed".green
 
-		if generate_info_only then
-			# 2. provision 추출
-			system( "security cms -D -i " + app + "/embedded.mobileprovision > " + folder + "provision.plist" )
+        # 1. Extract code signing certificates (Ruby 내장 메서드로 경로 처리)
+        puts "    [INFO] Extracting code signing certificates...".cyan
+        Dir.chdir(folder) do
+            unless system('codesign', '-d', '--extract-certificates', app, out: :close, err: :close)
+                raise "Failed to extract app certificates"
+            end
+        end
+        puts "    [SUCCESS] Certificates extracted".green
 
-			# 3. entitlement 생성
-			if $Entitlements == '' then
-				system( "codesign -d --entitlements - --xml " + app + " > " + folder + "entitlements.plist" )
-				# system( "cat " + folder + "entitlements.plist" )
-			else
-				system( 'cp "' + $Entitlements + '" ' + folder + 'entitlements.plist' )
-			end
+        if generate_info_only
+            # 2. Extract provisioning profile (배열 형식 명령어 실행)
+            puts "    [INFO] Processing mobileprovision...".cyan
+            profile_path = File.join(app, 'embedded.mobileprovision')
+            output_plist = File.join(folder, 'provision.plist')
+            unless system('security', 'cms', '-D', '-i', profile_path, out: output_plist, err: :close)
+                raise "Failed to extract provisioning profile"
+            end
+            puts "    [SUCCESS] Provisioning profile extracted".green
 
-			# genesis에 저장할 인증서 3개 추출
-			for i in ['0', '1', '2']
-				cmdi = "openssl x509 -inform DER -in " + folder + "codesign" + i + " -noout -nameopt multiline"
-				certopt = "no_header,no_version,no_serial,no_signame,no_subject,no_issuer,no_validity,no_pubkey,no_sigdump,no_aux,no_extensions"
-				system( cmdi + ",utf8 -subject -issuer -serial -pubkey -text -dates -certopt " + certopt + " > " + folder + "certificate" + i + ".txt" )
-				system("openssl rsa -pubin -inform PEM -text -noout < " + folder + "certificate" + i + ".txt > " + folder + "pemformat" + i + ".txt")
-			end
+            # 3. Handle entitlements (안전한 파일 복사)
+            entitlements_path = File.join(folder, 'entitlements.plist')
+            puts "    [INFO] Generating entitlements...".cyan
+            if defined?($Entitlements) && !$Entitlements.to_s.strip.empty?
+                FileUtils.cp($Entitlements, entitlements_path)
+                puts "    [INFO] Using custom entitlements file".cyan
+            else
+                unless system('codesign', '-d', '--entitlements', '-', '--xml', app, out: entitlements_path, err: :close)
+                    raise "Failed to extract entitlements"
+                end
+                puts "    [INFO] Extracted entitlements from app".cyan
+            end
 
-			return
-		end
+            # 4. Process certificates (Open3으로 출력 리다이렉션)
+            puts "    [INFO] Generating certificate details...".cyan
+            %w[0 1 2].each do |i|
+                cert_der = File.join(folder, "codesign#{i}")
+                cert_txt = File.join(folder, "certificate#{i}.txt")
+                pem_txt = File.join(folder, "pemformat#{i}.txt")
 
-		# 4 추출된 leaf 인증서를 X.509 형식으로 변환
-		system( cmd + ",-esc_msb,utf8 -subject > " + folder + "certificate.pem" )
+                raise "Missing DER certificate: #{cert_der}" unless File.exist?(cert_der)
 
-		# 5 인증서 명 추출
-		file = File.open( folder + "certificate.pem" )
-		file.each_line do |line|
-			sline = line.strip
-			next unless sline.start_with?( "commonName " )
-			cert = sline.split( '=' )[1].strip
-			break
-		end
-		file.close unless file.nil?
+                # OpenSSL 명령어를 배열 형식으로 실행
+                unless system('openssl', 'x509', '-inform', 'DER', '-in', cert_der, '-noout', 
+                             '-nameopt', 'multiline,utf8', '-subject', '-issuer', '-serial', 
+                             '-pubkey', '-text', '-dates', '-certopt', 'no_header,no_version,no_serial,no_signame,no_subject,no_issuer,no_validity,no_pubkey,no_sigdump,no_aux,no_extensions',
+                             out: cert_txt, err: :close)
+                    raise "Failed to generate certificate details: #{cert_der}"
+                end
 
-		if cert == '' then
-			puts ".\n.\nCannot get certificate information, check your IPA file and try again.\n.\n.\n"
-			exit( false )
-		end
-		
-		# 6 추출된 인증서가 시스템 키체인에 등록된 인증서인지 확인
-		valid = false
-		system( "security find-identity -v -p codesigning > " + folder + "certificates" )
-		file = File.open( folder + "certificates" )
-		file.each_line do |line|
-			valid = true if line.strip.include?( cert )
-		end
-		if !valid
-			puts ".\n.\nThe certificate used to sign your IPA does not exist in your system, check your system's key-chain and try again.\n"
-			puts "** App's certificate : " + cert
-			puts "** System keychain's certificate : "
-			system( "security find-identity -v -p codesigning" )
-			# exit( false )
-		end
-		file.close unless file.nil?
-	
-		# 7 codesign 실행
-		system( "rm -r " + app + "/_CodeSignature" )
-		system( 'codesign -f -s "' + cert + '" --entitlements ' + folder + 'entitlements.plist ' + app + '/' )
-	rescue => e
-		puts ".\n.\nProblem has occurred while code-signing your app, please try again.\n[Error] " + e.to_s + "\nIf this error occurs continuously, contact AppSealing Help Center.\n.\n.\n"
-		exit( false )
-	end
+                unless system('openssl', 'rsa', '-pubin', '-inform', 'PEM', '-text', '-noout',
+                             in: cert_txt, out: pem_txt, err: :close)
+                    raise "Failed to convert to PEM format: #{cert_txt}"
+                end
+
+                puts "    [DEBUG] Processed certificate #{i} → #{pem_txt}".yellow
+            end
+            return
+        end
+
+        # 5. Convert leaf certificate (출력 숨김)
+        puts "    [INFO] Processing leaf certificate...".cyan
+        cert_der = File.join(folder, "codesign0")
+        cert_pem = File.join(folder, "certificate.pem")
+        raise "Missing leaf certificate: #{cert_der}" unless File.exist?(cert_der)
+        
+        unless system('openssl', 'x509', '-inform', 'DER', '-in', cert_der, '-noout',
+                     '-nameopt', 'multiline,-esc_msb,utf8', '-subject', out: cert_pem, err: :close)
+            raise "Leaf certificate conversion failed"
+        end
+        puts "    [SUCCESS] Leaf certificate converted".green
+
+        # 6. Extract common name (파일 처리 강화)
+        puts "    [INFO] Extracting certificate common name...".cyan
+        cert = File.read(cert_pem).lines.grep(/commonName\s*=/).first.to_s.split('=').last.strip
+        if cert.empty?
+            puts ".\n.\n[ERROR] Certificate information missing - verify IPA integrity\n.\n.\n".red.bold
+            exit(false)
+        end
+        puts "  • Using certificate: #{cert}"
+
+        # 7. Keychain validation (Open3으로 출력 캡처)
+        puts "    [INFO] Validating against keychain...".cyan
+        keychain_output, status = Open3.capture2('security', 'find-identity', '-v', '-p', 'codesigning')
+        unless status.success?
+            puts "    [ERROR] Keychain query failed".red
+            puts keychain_output.lines.map { |l| "    #{l}" }.join
+            raise "Keychain validation error"
+        end
+        
+        unless keychain_output.include?(cert)
+            puts "    [WARNING] Certificate not found in keychain".yellow
+            puts "    [DEBUG] Available certificates:".yellow
+            system('security', 'find-identity', '-v', '-p', 'codesigning')
+            raise "Certificate mismatch"
+        end
+        puts "    [SUCCESS] Keychain validation passed".green
+
+        # 8. Execute code signing (출력 완전 숨김)
+        puts "    [INFO] Starting code signing...".cyan
+        codesig_dir = File.join(app, "_CodeSignature")
+        FileUtils.rm_rf(codesig_dir) if File.exist?(codesig_dir)
+        entitlements_path = File.join(folder, "entitlements.plist")
+        raise "Missing entitlements file: #{entitlements_path}" unless File.exist?(entitlements_path)
+
+        unless system('codesign', '-f', '-s', cert, '--entitlements', entitlements_path, app, out: :close, err: :close)
+            raise "Code signing failed"
+        end
+        puts "    [SUCCESS] Code signing completed".green
+
+    rescue SystemExit
+        raise
+    rescue => e
+        puts ".\n.\n[CRITICAL] Code signing error: #{e}\nPlease verify inputs and environment.\nFor persistent issues, contact AppSealing support.\n.\n.\n"
+        exit(false)
+    end
 end
-
+ 
 
 #--------------------------------------------------------------------------------------------
 #  appsealing.lic 파일 읽기
 #--------------------------------------------------------------------------------------------
-def get_accountID_hash_from_license_file( path )
-	license = File.open( path, "r+b" )
+def get_accountID_hash_from_license_file(path)
+	$account_id_hash = nil
+	$sdk_version = nil
+  
+	puts "    [INFO] Checking license file: #{path}".cyan
+  
+	unless File.exist?(path)
+		warn "[ERROR] License file not found: #{path}".red.bold
+		return
+	end
+  
+	expected_magic = "\x41\x53\x4C\x46\x76".b # "ASLFv"
+  
+	begin
+		File.open(path, "rb") do |file|
+		# Read and check magic header
+		header = file.read(5)
+		puts "    [DEBUG] Magic header: #{header&.unpack1('H*')}".yellow
+		unless header == expected_magic
+			warn "[ERROR] Invalid license format: Magic number mismatch".red.bold
+			return
+		end
+		puts "    [INFO] Magic number check passed".cyan
 
-	#header = license.read( 8 )
-	#magic = "\x41\x53\x4C\x46\x76\x32\x0A\x0D".force_encoding( Encoding::ASCII_8BIT )	#V2
-	header = license.read( 5 )
-	magic = "\x41\x53\x4C\x46\x76".force_encoding( Encoding::ASCII_8BIT )	#V2 +
-	if header == magic then
-		license.read( 3 )
-		$sdk_version = license.read( 48 ).gsub( /\000/, '' )
-		#puts " ===> version : " + $sdk_version
-		license.read( 8 )
-		# account ID hash 추출
-		accountIDhash = license.read( 32 ).unpack( 'c*' )
-		$account_id_hash = accountIDhash.pack( 'c*' ).unpack( 'H*' ).first
-		#puts " ===> account id : " + $account_id_hash
+		# Skip 3 bytes (reserved or unused)
+		file.read(3)
+
+		# Read SDK version (48 bytes), remove null bytes
+		$sdk_version = file.read(48)&.gsub(/\x00/, '')
+		puts "    [INFO] SDK Version: #{$sdk_version.inspect}".cyan
+		if $sdk_version.nil? || $sdk_version.empty?
+			warn "[ERROR] Corrupted license: SDK version missing".red.bold
+			return
+		end
+
+		# Skip 8 bytes (reserved or unused)
+		file.read(8)
+
+		# Read 32 bytes for account ID hash
+		account_hash_bin = file.read(32)
+		if account_hash_bin.nil? || account_hash_bin.bytesize != 32
+			warn "[ERROR] Corrupted license: Account hash missing or wrong size".red.bold
+			return
+		end
+
+		# Convert binary hash to uppercase hex string and store in global variable
+		$account_id_hash = account_hash_bin.unpack1('H*').upcase
+		puts "    [INFO] Account ID Hash: #{$account_id_hash}".cyan
+		puts "    [SUCCESS] License file parsing completed".green
+		end
+	rescue => e
+		warn "[EXCEPTION] License parsing failed: #{e.message}"
+		$account_id_hash = nil
 	end
 end
+	
 
 #--------------------------------------------------------------------------------------------
-#  unreal 실행 파일에서 appsealing license 추출하기
+#  Extract AppSealing license from Unreal executable (FAST VERSION)
 #--------------------------------------------------------------------------------------------
-def get_accountID_hash_from_unreal_executable( path )
-	
-	$current_step += 1
-	puts "\n" + $current_step.to_s + ". Extracting accound ID from Unreal executable file ..."
+def get_accountID_hash_from_unreal_executable(path)
+    require 'stringio'
+    $current_step ||= 0
+    $bundle_id ||= ''
+    $sdk_version ||= ''
+    $account_id_hash = nil
+    $isUnreal ||= false
 
-	file_size = File.size( path )
-	
-	$position = 0
-	parse_finished = false
+    $current_step += 1
+    puts "\n[STEP #{$current_step += 1}] Extracting account ID from executable file...".bold.yellow
 
-	uiThread = Thread.new {
-		loop do
-			print "\r  ==> Searching license in Unreal-Executable : " + $position.to_s.reverse.gsub(/(\d{3})(?=\d)/, '\\1,').reverse
-			sleep 0.5
-			break if parse_finished
-			break if $position >= file_size
-		end
-		puts ''
-	}
+    unless File.exist?(path)
+        warn "    [ERROR] File not found: #{path}".red.bold
+        exit(false)
+    end
 
-	magic1 = "\x41\x53\x4C\x46".force_encoding( Encoding::ASCII_8BIT )	#V2
-	magic2 = "\x76\x34\x0A\x0D".force_encoding( Encoding::ASCII_8BIT )
-	sdk = "\x0\x0\x0\x0\x0".force_encoding( Encoding::ASCII_8BIT )
+    file_size = File.size(path)
+    puts "    [DEBUG] File size: #{file_size} bytes".yellow
 
-	parseThread = Thread.new {
-		File.open( path, 'rb' ) do |f|
-			while data = f.read( 4 * 1024 * 1024 ) do
-				offset = 0
-				while offset < data.length do
-					if data[(offset)..(offset + 3)] == magic1 then
-						if data[(offset + 4)..(offset + 7)] == magic2 and data[(offset + 51)..(offset + 55)] == sdk then
+    $position = 0
+    parse_finished = false
 
-							$sdk_version = data[(offset + 8)..(offset + 56)].gsub( /\000/, '' )
-							accountIDhash = data[(offset + 64)..(offset + 95)].unpack( 'c*' )
-							bundle_id = data[(offset + 96)..(offset + 96 + 255)].strip
-							
-							if $bundle_id.strip.include? bundle_id then	# (헤더 매직 일치) AND (SDK버전 마지막 8byte가 0) AND (번들ID 포함)
-								$account_id_hash = accountIDhash.pack( 'c*' ).unpack( 'H*' ).first
-								parse_finished = true
-								$isUnreal = true
-								break
-							end
-						end
-					end
-					$position = $position + 1
-					offset = offset + 1
-				end
-				break if parse_finished
-				break if $position >= file_size
-			end
-		end
-	}
-	parseThread.join
-	uiThread.join
+    magic1 = "\x41\x53\x4C\x46".b
+    magic2 = "\x76\x34\x0A\x0D".b
+    zero4  = "\x00\x00\x00\x00".b
+    chunk_size = 4 * 1024 * 1024
+    puts "    [DEBUG] Using chunk size: #{chunk_size} bytes".yellow
 
-	if !parse_finished then
-		puts ".\n.\nCannot extract AppSealing license. Please check if you included the license file in the build."
-		puts "If this error occurs continuously, contact AppSealing Help Center.\n.\n.\n"
-		exit( false )
-	end
+    position_mutex = Mutex.new
+
+    uiThread = Thread.new do
+        begin
+            last_reported_percent = -1
+            loop do
+                current_pos = position_mutex.synchronize { $position }
+                percent = (current_pos.to_f / file_size) * 100
+                percent = percent.round # 정수 %로 변환
+    
+                # 1% 단위로만 출력 또는 최종 100% 강제 출력
+                if percent > last_reported_percent || current_pos >= file_size
+                    formatted_pos = current_pos.to_s.reverse.gsub(/(\d{3})(?=\d)/, '\\1,').reverse
+                    formatted_percent = sprintf("%d%%", [percent, 100].min)
+                    print "\r    [INFO] Progress: #{formatted_pos}/#{file_size} (#{formatted_percent})".cyan
+                    last_reported_percent = percent
+                end
+    
+                sleep 0.1
+                break if parse_finished || current_pos >= file_size
+            end
+    
+            # 마지막에 줄바꿈 추가
+            formatted_pos = file_size.to_s.reverse.gsub(/(\d{3})(?=\d)/, '\\1,').reverse
+        rescue => e
+            warn "    [WARN] UI thread error: #{e.message}".yellow
+        end
+    end
+        
+    parseThread = Thread.new do
+        begin
+            File.open(path, 'rb') do |f|
+                buffer = "".b
+                total_read = 0
+                chunk_count = 0
+                last_percent = 0
+                while chunk = f.read(chunk_size)
+                    chunk_count += 1
+                    buffer << chunk
+                    total_read += chunk.bytesize
+                    search_from = 0
+                    magic_found = 0
+
+                    while (idx = buffer.index(magic1, search_from))
+                        magic_found += 1
+                        global_pos = total_read - buffer.bytesize + idx
+
+                        position_mutex.synchronize { $position = global_pos }
+
+                        if buffer.bytesize < idx + 256 + 96
+                            buffer = buffer[idx..-1]
+                            break
+                        end
+
+                        # Magic2 검증
+                        if buffer[idx+4,4] != magic2
+                            search_from = idx + 1
+                            next
+                        end
+
+                        # Zero4 검증
+                        if buffer[idx+51,4] != zero4
+                            search_from = idx + 1
+                            next
+                        end
+
+                        # 데이터 추출
+                        sdk_bytes = buffer[idx+8, 49]
+                        $sdk_version = sdk_bytes.gsub(/\000/, '')
+                        puts "\n\n  • SDK version: #{$sdk_version}"
+
+                        account_bytes = buffer[idx+64, 32]
+                        if account_bytes&.bytesize == 32
+                            $account_id_hash = account_bytes.unpack1('H*')
+                            puts "  • Account hash: #{$account_id_hash[0..10]}..."
+                        else
+                            warn "    [WARN] Invalid account hash data at position #{global_pos + 64}".yellow
+                        end
+
+                        bundle_bytes = buffer[idx+96, 256]
+                        $bundle_id = bundle_bytes.strip
+                        puts "  • Bundle ID: #{$bundle_id}"
+
+                        if $account_id_hash && !$account_id_hash.empty?
+                            parse_finished = true
+                            $isUnreal = true
+                            puts "    [INFO] Valid license found!".green
+                            break
+                        end
+
+                        search_from = idx + 1
+                    end
+                    percent = (total_read.to_f / file_size) * 100
+                    if percent.to_i > last_percent
+                      sleep 0.1
+                      last_percent = percent.to_i
+                    end
+                    break if parse_finished
+
+                    # 버퍼 관리
+                    keep_bytes = [buffer.bytesize, 256 + 96].min
+                    position_mutex.synchronize { $position = total_read - keep_bytes }
+                    buffer = buffer[-keep_bytes..-1] || "".b
+                end
+            end
+        rescue => e
+            warn "    [ERROR] Parsing error: #{e.message}".red.bold
+            puts e.backtrace.first(5).join("\n")
+        ensure
+            parse_finished = true
+            position_mutex.synchronize { $position = file_size }
+        end
+    end
+
+    parseThread.join
+    uiThread.join
+
+    unless $account_id_hash && !$account_id_hash.empty?
+        warn "\n    [ERROR] Failed to extract AppSealing account ID".red.bold
+        warn "    [ERROR] Possible causes:".red.bold
+        warn "    - Magic headers not found in binary".red
+        warn "    - File is not an AppSealing-protected Unreal executable".red
+        warn "    - License data corrupted".red
+        exit(false)
+    end
 end
+
 
 #--------------------------------------------------------------------------------------------
 #  JavaScript bytecode(main.jsbundle) 파일 암호화
 #--------------------------------------------------------------------------------------------
-def encrypt_javascript_bytecode( app )
-	if $sdk_version.start_with?( 'NEW' ) then
-		$sdk_version = '1.0.0.0'
-	end
-	#$sdk_version = '1.3.1.1'
-	$use_ssl = true
-	if $baseURL.start_with?( "http://" )
-		$use_ssl = false
-	end
-
-	$current_step += 1
-	puts "\n" + $current_step.to_s + ". Encrypting React Native javascript bytecode file ..."
-
-	system( 'cd "' + app.to_s + '";zip -q main.zip main.jsbundle' )
-	jsfile = File.open( app.to_s + "/main.zip", "rb" )
-	result_path = app.to_s + "/enc_main.zip"
-
-	# 7-1. bundle ID 및 account ID hash 추출
-	sealing_api  = $baseURL + 'html5/requestSealingForIOS'
-	check_api    = $baseURL + 'html5/sealingStatusForIOS'
-	download_api = $baseURL + 'html5/downloadSealedFileForIOS'
-
-	finished = false
-
-	puts "** Sealing : " + sealing_api.to_s + "\n  > bundle ID : " + $bundle_id + "\n  > Account ID : " + $account_id_hash + "\n  > SDK version : " + $sdk_version + "\n"
-
-	uiThread = Thread.new {
-		print '  ==> Processing for sealing '
-		loop do
-			print '.'		
+def encrypt_javascript_bytecode(app)
+	# Initialize SDK version and SSL settings
+	$sdk_version = '1.0.0.0' if $sdk_version.start_with?('NEW')
+	$use_ssl = !$baseURL.start_with?("http://")
+	
+	puts "\n[STEP #{$current_step += 1}] Encrypting React Native JavaScript bytecode".bold.yellow
+  
+	# Prepare files
+	zip_path = "#{app}/main.zip"
+	result_path = "#{app}/enc_main.zip"
+	
+	begin
+		# 1. Create zip archive
+		unless system("cd #{Shellwords.escape(app)} && zip -q main.zip main.jsbundle")
+			raise "Failed to create JS bundle archive"
+		end
+		puts "    [INFO] Temporary archive created: #{zip_path}".cyan
+	
+		# 2. API endpoints
+		endpoints = {
+			sealing: URI("#{$baseURL}html5/requestSealingForIOS"),
+			status: URI("#{$baseURL}html5/sealingStatusForIOS"),
+			download: URI("#{$baseURL}html5/downloadSealedFileForIOS")
+		}
+	
+		# 3. Display sealing info
+		puts(<<~INFO.lines.map { |line| "    " + line }.join)
+			[SEALING REQUEST]
+			- Bundle ID: #{$bundle_id}
+			- Account ID: #{$account_id_hash}
+			- SDK Version: #{$sdk_version}
+			- Endpoint: #{endpoints[:sealing]}
+			INFO
+	
+		# 4. Progress UI
+		sealing_complete = false
+		progress = Thread.new do
+			print "    [PROGRESS] Sealing process".ljust(32).cyan
+			until sealing_complete
+			print ".".cyan
 			sleep 0.5
-			break if finished
+			end
 		end
-		print ' Done!'
-		puts ''
-	}
-
-	netThread = Thread.new {
-		begin
-			# 7-2. 암호화(실링) 요청
-			uri = URI( sealing_api )
-			request = Net::HTTP::Post.new( uri )
-			form_data =
-			[
-				['bundle_id', $bundle_id],
-				['account_id_hash', $account_id_hash],
-				['sdk_version', $sdk_version],
-				['html5file', jsfile]
-			]
-			request.set_form form_data, 'multipart/form-data'
-			response = Net::HTTP.start( uri.hostname, uri.port, use_ssl: $use_ssl ) do |http|
-				http.request( request )
-			end
-
-			# 7-3. 결과 확인 및 pack_id 추출
-			result = JSON.parse( response.body )
-			code = result['result']['code']
-			if code != '0000' then
-				raise result['result']['message']
-			end
-			pack_id = result['SEALING_INFO']['pack_id']
-
-
-			# 7-4. 암호화(실링) 상태 확인
-			uri = URI( check_api )
-			request = Net::HTTP::Post.new( uri )
-			form_data = [['pack_id', pack_id]]
-			request.set_form form_data, 'multipart/form-data'
-
-			loop do
-				response = Net::HTTP.start( uri.hostname, uri.port, use_ssl: $use_ssl ) do |http|
-					http.request( request )
-				end
-
-				result = JSON.parse( response.body )
-				code = result['result']['code']
-				status = result['SEALING_INFO']['status']
-				if code != '0000' then
-					raise result['result']['message']
-				end
-
-				case status
-				when '2'
-					break
-				when '3'
-					raise result['SEALING_INFO']['message']
-				end
-				sleep 0.5	# 0.5초 간격으로 확인
-			end
-
-
-			# 7-5. 암호화(실링) 파일 다운로드
-			uri = URI( download_api )
-			request = Net::HTTP::Post.new( uri )
-			form_data =
-			[
-				['bundle_id', $bundle_id],
-				['account_id_hash', $account_id_hash],
-				['pack_id', pack_id]
-			]
-			request.set_form form_data, 'multipart/form-data'
-
-			response = Net::HTTP.start( uri.hostname, uri.port, use_ssl: $use_ssl ) do |http|
-				http.request( request )
-			end
-
+	
+		response = nil
+		# 5. Network operations
+		Thread.new {
 			begin
-				result = JSON.parse( response.body )
-				code = result['result']['code']
-			rescue => e
-				# File response !!
-				open( result_path, "wb") do |file|
-					file.write( response.body )
-				end	
-				system( 'cd "' + app.to_s + '";unzip -qo enc_main.zip' )
-				File.delete( app.to_s + '/main.zip' ) if File.exist?( app.to_s + '/main.zip' )
-				File.delete( app.to_s + '/enc_main.zip' ) if File.exist?( app.to_s + '/enc_main.zip' )
-				system( 'xattr -cr "' + app.to_s + '/main.jsbundle"' )
+				# 5.1 Initial sealing request
+				File.open(zip_path, "rb") do |jsfile|
+				response = Net::HTTP.start(endpoints[:sealing].hostname, endpoints[:sealing].port, use_ssl: $use_ssl) do |http|
+					request = Net::HTTP::Post.new(endpoints[:sealing])
+					request.set_form([
+						['bundle_id', $bundle_id],
+						['account_id_hash', $account_id_hash],
+						['sdk_version', $sdk_version],
+						['html5file', jsfile]
+					], 'multipart/form-data')
+					http.request(request)
+				end
+	
+				handle_response(response, :sealing)
+				pack_id = JSON.parse(response.body).dig('SEALING_INFO', 'pack_id')
+				
+				# 5.2 Poll sealing status
+				status_uri = endpoints[:status]
+				loop do
+					response = Net::HTTP.start(status_uri.hostname, status_uri.port, use_ssl: $use_ssl) do |http|
+						request = Net::HTTP::Post.new(status_uri)
+						request.set_form([['pack_id', pack_id]], 'multipart/form-data')
+						http.request(request)
+					end
+	
+					status_info = JSON.parse(response.body)
+					case status_info.dig('SEALING_INFO', 'status')
+						when '2' then break  # Success status
+						when '3' then
+							error_msg = status_info.dig('SEALING_INFO', 'message') || "Unknown server error"    	
+							raise "Server sealing failed (Status 3): #{error_msg}"
+					end
+					sleep 0.5
+				end
+	
+				# 5.3 Download sealed file
+				response = Net::HTTP.start(endpoints[:download].hostname, endpoints[:download].port, use_ssl: $use_ssl) do |http|
+					request = Net::HTTP::Post.new(endpoints[:download])
+					request.set_form([
+						['bundle_id', $bundle_id],
+						['account_id_hash', $account_id_hash],
+						['pack_id', pack_id]
+					], 'multipart/form-data')
+					http.request(request)
+				end
+	
+				# 5.4 Handle final response
+				if response['Content-Type'].include?('application/json')
+					handle_response(response, :download)
+				else
+					File.write(result_path, response.body)
+					system("cd #{Shellwords.escape(app)} && unzip -qo enc_main.zip")
+					FileUtils.rm_f(["#{app}/main.zip", result_path])
+					system("xattr -cr #{Shellwords.escape(app)}/main.jsbundle")
+				end
 			end
-		rescue => e
-			puts ".\n.\nCannot connect to AppSealing server or bad response, check your network status and try again.\n(Did you run this script twice in the same file?)"
-			puts "[Error] " + e.to_s + "\n"
-			puts "** Your data : \n  > bundle ID : " + $bundle_id + "\n  > Account ID : " + $account_id_hash + "\n  > SDK version : " + $sdk_version + "\n"
-			puts "If this error occurs continuously, contact AppSealing Help Center.\n.\n.\n"
-			exit( false )
-		end
-		finished = true
-	}
-	netThread.join
-	uiThread.join
-
-	$current_step += 1
-	puts "\n" + $current_step.to_s + ". Successfully encrypted javascript bytecode ..."
+	
+			rescue => e
+				server_message = begin
+					JSON.parse(response.body)&.dig('SEALING_INFO', 'message') rescue "N/A"
+				end
+				server_pack_id = begin
+					JSON.parse(response.body)&.dig('SEALING_INFO', 'pack_id') rescue "N/A"
+				end
+			
+				puts <<~ERROR.red.bold
+					\n[ERROR] Sealing process failed
+					- Type: #{e.class}
+					- Message: #{e.message}
+					- Server Message: #{server_message}
+					- Server pack_id: #{server_pack_id}
+					- Bundle ID: #{$bundle_id}
+					- Account ID: #{$account_id_hash}
+					- SDK Version: #{$sdk_version}
+					- HTTP Status: #{response&.code || 'N/A'}
+					
+					Possible causes:
+					1. Server-side error: #{server_message}
+					2. Network connectivity issues
+					3. Invalid API credentials
+					4. Resource validation failure
+				ERROR
+				exit(false)
+			ensure
+				sealing_complete = true
+			end
+		}.join
+	
+		progress.join
+		puts "\n    [SUCCESS] JavaScript bytecode encryption completed successfully".green
+  
+	ensure
+		# Cleanup temporary files
+		FileUtils.rm_f([zip_path, result_path]) rescue nil
+	end
 end
 
+def handle_response(response, api_phase)
+	return if response.is_a?(Net::HTTPSuccess)
+  
+	error_info = begin
+		JSON.parse(response.body).dig('result', 'message') rescue response.body[0..200]
+	end
+	
+	raise <<~ERROR.red.bold
+		API Error (#{api_phase.to_s.upcase})
+		- Status: #{response.code}
+		- Message: #{error_info}
+		- URI: #{response.uri}
+	ERROR
+end
+  
 
 #--------------------------------------------------------------------------------------------
 # PlistManager 클래스는 plist 파일을 관리하는 기능을 제공합니다.
@@ -815,15 +1169,15 @@ class PlistManager
 	
 		case next_element.name
 		when 'string'
-		  next_element.text # 문자열 값을 반환
+		  	next_element.text # 문자열 값을 반환
 		when 'array'
-		  next_element.elements.map(&:text) # 배열 값을 반환 (각 요소의 텍스트)
+		  	next_element.elements.map(&:text) # 배열 값을 반환 (각 요소의 텍스트)
 		when 'true'
-		  true # <true/> 값을 처리
+		  	true # <true/> 값을 처리
 		when 'false'
-		  false # <false/> 값을 처리
+		  	false # <false/> 값을 처리
 		else
-		  nil # 처리하지 않는 타입의 경우 nil 반환
+		  	nil # 처리하지 않는 타입의 경우 nil 반환
 		end
 	end
 
@@ -832,32 +1186,32 @@ class PlistManager
 		url_types_array = XPath.first(@doc, "//key[text()='CFBundleURLTypes']/following-sibling::array")
 		
 		if url_types_array
-		  # Locate the first dict element in CFBundleURLTypes array
-		  dict_element = url_types_array.elements["dict"]
-		  if dict_element
-			# Locate CFBundleURLSchemes array within the dict
-			schemes_key = dict_element.elements["key[text()='CFBundleURLSchemes']"]
-			schemes_array = schemes_key&.next_element
-	
-			if schemes_array && schemes_array.name == "array"
-			  # Replace existing schemes with the new scheme
-			  schemes_array.elements.each { |e| schemes_array.delete(e) }
-			  schemes_array.add_element("string").text = new_scheme
+			# Locate the first dict element in CFBundleURLTypes array
+			dict_element = url_types_array.elements["dict"]
+			if dict_element
+				# Locate CFBundleURLSchemes array within the dict
+				schemes_key = dict_element.elements["key[text()='CFBundleURLSchemes']"]
+				schemes_array = schemes_key&.next_element
+		
+				if schemes_array && schemes_array.name == "array"
+					# Replace existing schemes with the new scheme
+					schemes_array.elements.each { |e| schemes_array.delete(e) }
+					schemes_array.add_element("string").text = new_scheme
+				else
+					# If CFBundleURLSchemes doesn't exist, create it
+					new_schemes_key = Element.new("key")
+					new_schemes_key.text = "CFBundleURLSchemes"
+					new_schemes_array = Element.new("array")
+					new_schemes_array.add_element("string").text = new_scheme
+			
+					dict_element.add_element(new_schemes_key)
+					dict_element.add_element(new_schemes_array)
+				end
 			else
-			  # If CFBundleURLSchemes doesn't exist, create it
-			  new_schemes_key = Element.new("key")
-			  new_schemes_key.text = "CFBundleURLSchemes"
-			  new_schemes_array = Element.new("array")
-			  new_schemes_array.add_element("string").text = new_scheme
-	
-			  dict_element.add_element(new_schemes_key)
-			  dict_element.add_element(new_schemes_array)
+				puts "No <dict> element found under CFBundleURLTypes."
 			end
-		  else
-			puts "No <dict> element found under CFBundleURLTypes."
-		  end
 		else
-		  puts "No CFBundleURLTypes found in the plist."
+			puts "No CFBundleURLTypes found in the plist."
 		end
 	end
 
@@ -875,8 +1229,8 @@ class PlistManager
 	
 	# 기존 key에 문자열 요소를 추가합니다.
 	def add_string_element(key_element, value)
-	  dict_element = key_element.parent          # 부모 <dict> 요소를 가져옴
-	  dict_element.add_element('string').text = value # 새로운 <string> 요소 추가 및 값 설정 
+		dict_element = key_element.parent          # 부모 <dict> 요소를 가져옴
+		dict_element.add_element('string').text = value # 새로운 <string> 요소 추가 및 값 설정 
 	end
 
 	# Helper 메소드: 특정 key와 그 값을 plist에서 제거합니다.
@@ -911,6 +1265,175 @@ class PlistManager
 	end
 end
 
+# -------------------------------------------
+# 헬퍼 함수
+# -------------------------------------------
+def update_plist_key(manager, key, value)
+	return unless value
+	puts "  → Updating #{key}: #{value}"
+	manager.update_key(key, value)
+end
+
+def safe_system(cmd, error_msg)
+	system(cmd) || raise("#{error_msg}\nCommand: #{cmd}")
+end
+
+#--------------------------------------------------------------------------------------------
+#  hermes 검증
+#--------------------------------------------------------------------------------------------
+def detect_react_native_version_from_project_root
+    # 스크립트 위치 기준 프로젝트 루트 계산
+    current_dir = Pathname.new(__dir__)
+    project_root = current_dir.join('../..').expand_path
+
+    version = nil
+
+    puts "    [INFO] Searching React Native version in: #{project_root}".cyan
+
+    # 1. package.json에서 dependencies/react-native 확인
+    project_pkg = project_root.join('package.json')
+    if project_pkg.exist?
+        begin
+            pkg_info = JSON.parse(File.read(project_pkg))
+            if pkg_info['dependencies'] && pkg_info['dependencies']['react-native']
+                version = pkg_info['dependencies']['react-native'].gsub(/[^0-9.]/, '')
+                puts "    [INFO] Found in package.json: #{version}".cyan
+            end
+        rescue => e
+            puts "    [DEBUG] package.json parsing failed: #{e.message}".yellow
+        end
+    end
+
+    # 2. node_modules/react-native/package.json 확인
+    unless version
+        rn_pkg = project_root.join('node_modules', 'react-native', 'package.json')
+        if rn_pkg.exist?
+            begin
+                rn_info = JSON.parse(File.read(rn_pkg))
+                version = rn_info['version']
+                puts "    [INFO] Found in node_modules: #{version}".cyan
+            rescue => e
+                puts "    [DEBUG] react-native/package.json parsing failed: #{e.message}".yellow
+            end
+        end
+    end
+
+    if version
+        puts "    [INFO] Detected React Native version: #{version}".cyan
+    else
+        puts "    [WARN] React Native version not detected!".yellow
+    end
+    version
+end
+
+HERMES_RN_MATRIX = {
+	"85613e1f9d1216f2cce7e54604be46057092939d" => [["0.71"]],
+	"49794cfc7c81fb8f69fd60c3bbf85a7480cc5a77" => [["0.72"]],
+	"21043a3fc062be445e56a2c10ecd8be028dd9cc5" => [["0.73"]],
+	"bb1e74fe1e95c2b5a2f4f9311152da052badc2bc" => [["0.74", 0..2]],
+	"7bda0c267e76d11b68a585f84cfdd65000babf85" => [["0.74", 3..6], ["0.75"]],
+	"db6d12e202e15f7a446d8848d6ca8f7abb3cfb32" => [["0.76"], ["0.77", 0..1]],
+	"a942ef374897d85da38e9c8904574f8376555388" => [["0.78"]]
+}
+
+def parse_rn_version(rn_version)
+	parts = rn_version.split(".")
+	major_minor = parts[0..1].join(".")
+	patch = parts[2]&.to_i
+	[major_minor, patch]
+end
+
+def version_match?(rn_version, hermes_rn_version, hermes_commit)
+	rn_major_minor, rn_patch = parse_rn_version(rn_version)
+	matrix = HERMES_RN_MATRIX[hermes_commit]
+	return false unless matrix
+
+	matrix.any? do |ver|
+		if ver.length == 1
+			rn_major_minor == ver[0]
+		else
+			rn_major_minor == ver[0] && rn_patch && ver[1].include?(rn_patch)
+		end
+	end
+end
+
+def find_hermes_version_info(app_path, rn_version)
+    target_pattern = /\[AppSealing\] hermes engine: ([a-fA-F0-9]+) \(for React Native ([\d.x]+)\)/i
+    found_files = []
+    match_found = false
+
+    puts "    [INFO] Searching 'hermes' files in app bundle...".cyan
+
+    Find.find(app_path) do |path|
+        next unless File.file?(path)
+        
+        if File.basename(path).downcase == 'hermes'
+            found_files << path
+            puts "    [FOUND] #{path}".green
+
+            begin
+                content = File.binread(path)
+				if content.match(target_pattern)
+					hash = $1
+					hermes_rn_version = $2
+					puts "    [VERSION] Commit hash: #{hash}".yellow
+					puts "    [VERSION] Hermes for React Native: #{hermes_rn_version}".yellow
+				  
+					if version_match?(rn_version, hermes_rn_version, hash)
+						puts "    [SUCCESS] Version matched! (RN #{rn_version} ↔ Hermes #{hermes_rn_version})".green
+						match_found = true
+					else
+						puts "    [ERROR] Version mismatch! (RN #{rn_version} ↔ Hermes #{hermes_rn_version})".red
+					end
+				end
+			rescue => e
+                puts "    [ERROR] Failed to read #{path}: #{e.message}".red
+            end
+        end
+    end
+    [match_found, found_files]
+end
+
+def check_local_hermes_files(rn_version)
+    puts "\n    [INFO] Checking local Hermes files in script directory...".cyan
+    local_dir = File.expand_path(File.dirname(__FILE__))
+    target_pattern = /\[AppSealing\] hermes engine: ([a-fA-F0-9]+) \(for React Native ([\d.x]+)\)/i
+    matching_path = nil
+
+    Find.find(local_dir) do |path|
+        next unless File.file?(path)
+        
+        if File.basename(path).downcase == 'hermes'
+            puts "    [FOUND] #{path}".green
+
+            begin
+                content = File.binread(path)
+                if content.match(target_pattern)
+                    hash = $1
+                    hermes_rn_version = $2
+                    puts "    [VERSION] Commit hash: #{hash}".yellow
+                    puts "    [VERSION] Hermes for React Native: #{hermes_rn_version}".yellow
+
+                    if version_match?(rn_version, hermes_rn_version)
+                        puts "    [SUCCESS] Local version matched!".green
+                        matching_path = path
+                        break  # 첫 번째 일치 파일 사용
+                    end
+                end
+            rescue => e
+                puts "    [ERROR] Failed to read #{path}: #{e.message}".red
+            end
+        end
+    end
+
+    unless matching_path
+        puts "    [WARN] No matching Hermes files found locally".yellow
+    end
+
+    matching_path
+end
+
+
 #--------------------------------------------------------------------------------------------
 # main
 #--------------------------------------------------------------------------------------------
@@ -924,386 +1447,538 @@ if __FILE__ == $0
 	end
 
 	if ARGV.length < 1 or File.extname( ARGV[0] ).delete( '.' ).downcase[0..-1] != 'ipa'
-		puts ".\n.\nusage: generate_hash YourApp.IPA [-url_scheme=url] [-icloud_services=service] [-camera=NSCameraUsageDescription] [-antihook=enable|disable] [-antiswizzle=enable|disable]"
-		puts "         url : URL scheme for Unreal app [optional]"
-		puts "         camera : camera usage description string to put into Info.plist [optional]"
-		puts "         antihook : enable or disable anti-hooking feature [optional, default=enabled]"
-		puts "         antiswizzle : enable or disable anti-swizzling feature [optional, default=disabled]"
-		puts ".\n.\n.\n"
+		puts ".\n.\nusage: generate_hash YourApp.IPA [-url_scheme=url] [-icloud_services=service] [-camera=NSCameraUsageDescription] [-antihook=enable|disable] [-antiswizzle=enable|disable]".yellow
+		puts "         url : URL scheme for Unreal app [optional]".yellow
+		puts "         camera : camera usage description string to put into Info.plist [optional]".yellow
+		puts "         antihook : enable or disable anti-hooking feature [optional, default=enabled]".yellow
+		puts "         antiswizzle : enable or disable anti-swizzling feature [optional, default=disabled]".yellow
+		puts ".\n.\n.\n".yellow
 		exit( false )
 	end
 
-	puts <<~INTRO
+	puts <<~INTRO.bold.green
+
 	
 	+-------------------------------------------------------------------------------------+
 	|                                                                                     |
-	|  AppSealing IPA Hash Generator V1.10.0.0 : provided by INKA Entworks                |
+	|  AppSealing IPA Hash Generator V1.11.0.0 : provided by INKA Entworks                |
 	|                                                                                     |
 	+-------------------------------------------------------------------------------------+
 	
 	INTRO
-	puts "[Target IPA]          = " + ARGV[0].to_s
 	
-	for i in 1 ... ARGV.length
-		if ARGV[i].include?( "-url_scheme=" ) then
-			$URL_Scheme = ARGV[i].dup.to_s.sub!( "-url_scheme=", "" )
-			puts "[URL Scheme]          = " + $URL_Scheme
-		end
-		if ARGV[i].include?( "-camera=" ) then
-			$CameraDesc = ARGV[i].dup.to_s.sub!( "-camera=", "" )
-			puts "[Camera Description]  = " + $CameraDesc
-		end
-		if ARGV[i].include?( "-version=" ) then
-			$version = ARGV[i].dup.to_s.sub!( "-version=", "" )
-			puts "[Version]  = " + $version
-		end
-		if ARGV[i].include?( "-antihook=" ) then
-			$antihook = ARGV[i].dup.to_s.sub!( "-antihook=", "" )
-			puts "[Anti-Hooking]        = " + $antihook
-		end
-		if ARGV[i].include?( "-antiswizzle=" ) then
-			$antiswizzle = ARGV[i].dup.to_s.sub!( "-antiswizzle=", "" )
-			puts "[Anti-Swizzling]      = " + $antiswizzle
-		end
+	puts "[Target IPA]         = " + ARGV[0].to_s
+
+	# 전역 변수 초기화
+	$folder = nil
+	$app = nil
+	$bundle_id = nil
+	$team_id = nil
+	$sdk_version = ''
+	
+
+	# -------------------------------------------
+	# 1. 파라미터 파싱 (개선된 버전)
+	# -------------------------------------------
+	ARGV.each_with_index do |arg, i|
+	next if i == 0 # 첫 번째 인자는 IPA 경로
+	
+	key, value = arg.split('=', 2)
+	case key
+	when '-url_scheme'
+		$URL_Scheme = value
+		puts "[URL Scheme]         = #{$URL_Scheme}"
+	when '-camera'
+		$CameraDesc = value
+		puts "[Camera Description] = #{$CameraDesc}"
+	when '-version'
+		$version = value
+		puts "[Version]            = #{$version}"
+	when '-antihook'
+		$antihook = value
+		puts "[Anti-Hooking]       = #{$antihook}"
+	when '-antiswizzle'
+		$antiswizzle = value
+		puts "[Anti-Swizzling]     = #{$antiswizzle}"
+	end
+end
+
+# -------------------------------------------
+# 2. IPA 처리 메인 로직
+# -------------------------------------------
+begin
+	# [Step 1] IPA 검증 및 압축 해제
+	ipa_path = ARGV[0].to_s
+	unless File.exist?(ipa_path)
+		raise "IPA file does not exist: #{ipa_path}"
 	end
 
-	# Unreal Shipping IPA를 App Store Connect에 업로드 할 때 "ERROR ITMS-90158" 오류가 발생하면
-	# 이 파라미터를 추가해 Info.plist의 CFBundleURLSchemes 값을 새로 설정하여 오류를 수정할 수 있음
-
-	#........................................................................................
-	# [Step 1] IPA 압축 해제
-	
-	if !File.exist?( ARGV[0].to_s ) then
-		puts ".\n.\nIPA file does not exist, please check path the IPA.\n.\n.\n"
-		exit( false )
-	end
-	
 	$current_step = 0
+	puts "\n[STEP #{$current_step += 1}] Preparing workspace...".bold.yellow
 
-	# 임시 temp 디렉터리 생성 및 클리어
-	folder = Dir.tmpdir() + "/AppSealing/" + SecureRandom.hex + "/"
-	#folder = "/Users/puzznic/Project/Temp/";
+	# 임시 디렉터리 생성
+	$folder = File.join(Dir.tmpdir, "AppSealing", SecureRandom.hex)
+	$folder = File.expand_path($folder) + "/"
 
-	puts "\n[Working Directory] = " + folder
+	FileUtils.mkdir_p($folder)
+	puts "  • Workspace: #{$folder}"
 
-	FileUtils.mkdir_p folder
-	system( 'rm -rf "' + folder + '*"' )
+	# 기존 파일 삭제 (안전한 버전)
+	Dir[File.join($folder, "*")].each { |f| FileUtils.rm_rf(f) }
 
-	# ipa 압축 해제
-	system( 'unzip -q "' + ARGV[0] + '" -d ' + folder + "Package/" );
-	app = Dir[folder + "Package/Payload/*"][0]	# app name
+	# IPA 압축 해제
+	package_dir = File.join($folder, "Package")
+	safe_system("unzip -q '#{ipa_path}' -d '#{package_dir}'", "IPA extraction failed")
 
-	if !File.exist?( app.to_s + "/_CodeSignature/CodeResources" ) then
-		puts ".\n.\nInvalid IPA file has passed to an argument, check your IPA file has codesigned and try again.\n.\n.\n"
-		exit( false )
+	# 앱 번들 검색
+	$app = Dir.glob(File.join(package_dir, "Payload/*.app")).first
+	unless $app && File.directory?($app)
+		raise "App bundle not found in Payload"
 	end
-	if File.exist?( app.to_s + "/Xamarin.iOS.dll" ) then
-		$isXamarin = true
-		system( "/usr/libexec/PlistBuddy -x -c 'Print ' " + app + "/Entitlements.plist > " + folder + "XamarinEntitlements.plist" )
-	end
-	if File.exist?( app.to_s + "/genesis" ) then
-		system( 'rm "' + app.to_s + '/genesis"' )
-	end
+	puts "  • App Bundle: #{$app}"
+	$app_path = $app.to_s
 
-	$current_step += 1
-	puts "\n" + $current_step.to_s + ". Payload has extracted from the IPA ..."
-
-	# Info.plist 파일을 평문으로 변경
-	system( '/usr/libexec/PlistBuddy -x -c \'Print \' "' + app + '/Info.plist" > "' + folder + 'Info.plist"' )
-	system( 'cp "' + folder + 'Info.plist" "' + app + '/Info.plist"' )
-
-
-	# app의 bundle ID 추출
-	info_plist_manager = PlistManager.new( app + "/Info.plist" )
-	$bundle_id = info_plist_manager.read( "CFBundleIdentifier" )
-
-	# URL scheme 변경
-	if $URL_Scheme
-		puts "\n --> Changing URL Scheme to : #{$URL_Scheme}"
-		info_plist_manager.update_url_scheme( $URL_Scheme )
+	# 코드 서명 검증
+	unless File.exist?(File.join($app, "_CodeSignature/CodeResources"))
+		raise "Invalid code signature"
 	end
 
-	if $version
-		puts "\n --> Changing version to : #{$version}"
-		info_plist_manager.update_key( 'CFBundleShortVersionString', $version )
-	end	
+    # React Native - hermes 검증
+    rn_version = detect_react_native_version_from_project_root
+    # 1. 앱 번들 내 Hermes 버전 확인
+    app_match, app_hermes_paths = find_hermes_version_info($app_path, rn_version)
+
+    unless app_match
+        # 2. 로컬 Hermes 파일 검색
+        local_hermes_path = check_local_hermes_files(rn_version)
+
+        if local_hermes_path && !app_hermes_paths.empty?
+            # 3. 로컬 파일로 교체
+            puts "\n    [INFO] Replacing app Hermes files...".cyan
+            app_hermes_paths.each do |dest_path|
+                begin
+                    FileUtils.cp(local_hermes_path, dest_path, verbose: true)
+                    puts "    [COPY] #{dest_path} updated".green
+                rescue => e
+                    puts "    [ERROR] Failed to copy: #{e.message}".red
+                end
+            end
+
+            # 4. 재검증
+            puts "\n    [INFO] Re-validating after replacement...".cyan
+            app_match_after, _ = find_hermes_version_info($app_path, rn_version)
+            if app_match_after
+                puts "    [SUCCESS] Version matched after replacement!".green
+            else
+                puts "    [ERROR] Still version mismatch after replacement".red
+            end
+        end
+    end
+
+	# [Step 2] Info.plist 처리
+	puts "\n[STEP #{$current_step += 1}] Modifying Info.plist".bold.yellow
 	
-	# ........................................................................................
-	# [Step 2] Unreal 앱 AppStore Connect 업로드 오류 해결을 위해 프로퍼티 추가
+	# Info.plist 복사
+	tmp_info_plist = File.join($folder, "Info.plist")
+	safe_system("/usr/libexec/PlistBuddy -x -c 'Print' '#{$app}/Info.plist' > '#{tmp_info_plist}'", "Info.plist extraction failed")
+	FileUtils.cp(tmp_info_plist, File.join($app, "Info.plist"))
 
-	# Camera description 변경
-	if $CameraDesc
-		puts "\n --> Changing NSCameraUsageDescription to : #{$CameraDesc}"
-		info_plist_manager.update_key( 'NSCameraUsageDescription', $CameraDesc )
-	end	
+	# Plist 관리자 초기화
+	info_plist_manager = PlistManager.new(File.join($app, "Info.plist"))
+	$bundle_id = info_plist_manager.read("CFBundleIdentifier")
+	puts "  • Bundle ID: #{$bundle_id}"
 
+	# 파라미터 적용
+	update_plist_key(info_plist_manager, 'CFBundleURLSchemes', $URL_Scheme)
+	update_plist_key(info_plist_manager, 'CFBundleShortVersionString', $version)
+	update_plist_key(info_plist_manager, 'NSCameraUsageDescription', $CameraDesc)
+	
 	info_plist_manager.save_file
-	
-	#........................................................................................
-	# [Step 3] 앱 서명에 사용된 인증서 정보를 읽어 genesis에 추가
 
-	sign_app_payload( app, folder, true )
-	
-	if !File.exist?( folder + "entitlements.plist" )
-		puts "error: Cannon extract entitlements.plist from IPA, try rebuild app..."
-		exit( 0 )
+	# [Step 3] 서명 정보 추출
+	puts "\n[STEP #{$current_step += 1}] Extracting signing info".bold.yellow
+	sign_app_payload($app, $folder, true)
+
+	# entitlements 검증
+	entitlements_path = File.join($folder, "entitlements.plist")
+	unless File.exist?(entitlements_path)
+		raise "Failed to extract entitlements.plist"
+	end
+	plist_manager = PlistManager.new(entitlements_path)
+	$app_id = plist_manager.read('application-identifier')
+
+	# 팀 ID 추출
+	mobileprovision_path = File.join($app, "embedded.mobileprovision")
+	if File.exist?(mobileprovision_path)
+		provision_plist = "#{mobileprovision_path}.plist"
+		safe_system("security cms -D -i '#{mobileprovision_path}' > '#{provision_plist}'", "Mobileprovision conversion failed")
+		
+		provision_manager = PlistManager.new(provision_plist)
+		$team_id = provision_manager.read('TeamIdentifier')&.first
+		puts "  • Team ID: #{$team_id}"
 	end
 
-	plist_manager = PlistManager.new( folder + "entitlements.plist" )
-	# plist_manager.print
-	$app_id = plist_manager.read( 'application-identifier' )
-	mobileprovision_path = app + '/embedded.mobileprovision'
-	if mobileprovision_path && File.exist?(mobileprovision_path)
-	  profile_text = `security cms -D -i #{mobileprovision_path} > #{mobileprovision_path}.plist`
-	  plist_manager = PlistManager.new( app + '/embedded.mobileprovision.plist' )
-	  $team_id = plist_manager.read( 'TeamIdentifier' ).first
+	rescue => e
+		puts "\n[ERROR] #{e.message}".red.bold
+		puts "Stack trace:\n#{e.backtrace.join("\n")}" if $DEBUG
+		exit(false)
 	end
 
 	#........................................................................................
 	# [Step 4] license 에서 account ID 추출
 
-	if File.exist?( app.to_s + "/appsealing.lic" ) then
-		get_accountID_hash_from_license_file( app.to_s + "/appsealing.lic" )
+	if File.exist?( $app_path + "/appsealing.lic" ) then
+		get_accountID_hash_from_license_file( $app_path + "/appsealing.lic" )
 	else
-		get_accountID_hash_from_unreal_executable( app.to_s + '/' + File.basename( app.to_s, File.extname( app.to_s )))
+		get_accountID_hash_from_unreal_executable( $app_path + '/' + File.basename( $app_path, File.extname( $app_path )))
 	end
 
 
 	#........................................................................................
 	# [Step 6] hermes bytecode(main.jsbuncle) 파일이 있을 경우 서버를 통해 암호화 진행
 
-	if File.exist?( app.to_s + "/main.jsbundle" ) then
-		encrypt_javascript_bytecode( app )
+	if File.exist?($app_path + "/main.jsbundle") && 
+		(begin
+			header = File.binread($app_path + "/main.jsbundle", 8)
+			header[0..3] == "Herm" &&  # 매직 넘버 체크
+			header[4..7].unpack('V')[0] > 59  # 버전 체크 (Hermes 0.1.0+)
+		rescue
+		  	false  # 파일 읽기 실패/검증 실패 시 false 반환
+		end)
+	then
+	 	encrypt_javascript_bytecode($app)
 	end
-
+	 
 
 	#........................................................................................
 	# [Step 7] 변경된 파일이 있을 수 있으므로 app을 1차 재서명
 
-	$current_step += 1
-	puts "\n" + $current_step.to_s + ". Codesigning your app using certificate used to sign your IPA ..."
-	sign_app_payload( app, folder, false )
+	puts "\n[STEP #{$current_step += 1}] Codesigning your app using certificate used to sign your IPA ...".bold.yellow
+	sign_app_payload( $app, $folder, false )
 
 
 	#........................................................................................
 	# [Step 8] 인증서 정보 추출
+    puts "    [INFO] Starting certificate information extraction...".cyan
 
-	certificate = ""
-	current_mode = 'none'
+    certificate = ""
+    current_mode = nil
 
-	cert_info =
-	{
-		'subject0' => "",
-		'issuer0' => "",
-		'serial0' => "",
-		'pubkey0' => "",
-		'valid_from0' => "",
-		'valid_to0' => "",
-		'app_id0' => "",
-		'team_id0' => "",
+    cert_info = {}
+    ['0', '1', '2'].each do |i|
+		cert_info["subject#{i}"] = ""
+		cert_info["issuer#{i}"] = ""
+		cert_info["serial#{i}"] = ""
+		cert_info["pubkey#{i}"] = ""
+		cert_info["valid_from#{i}"] = ""
+		cert_info["valid_to#{i}"] = ""
+		cert_info["app_id#{i}"] = ""
+		cert_info["team_id#{i}"] = ""
+    end
 
-		'subject1' => "",
-		'issuer1' => "",
-		'serial1' => "",
-		'pubkey1' => "",
-		'valid_from1' => "",
-		'valid_to1' => "",
-		'app_id1' => "",
-		'team_id1' => "",
-		
-		'subject2' => "",
-		'issuer2' => "",
-		'serial2' => "",
-		'pubkey2' => "",
-		'valid_from2' => "",
-		'valid_to2' => "",
-		'app_id2' => "",
-		'team_id2' => ""
-	}
+    ['0', '1', '2'].each do |i|
+		pem_file = "#{$folder}pemformat#{i}.txt"
+		cert_file = "#{$folder}certificate#{i}.txt"
 
-	for i in ['0', '1', '2']
-		# 인증서를 ASN.1 형식의 public key와 대조하기 위한 PEM 포맷을 snapshot으로 저장
-		file = File.open( folder + "pemformat" + i +".txt" )
-		file.each_line do |line|
-			if line.start_with?( 'Modulus' ) then
-				current_mode = 'pubkey' + i
-				next
-			end
-			if line.start_with?('Exponent') then
-				current_mode = 'none'
-				next
-			end
-	
-			if current_mode == 'pubkey' + i then
-				cert_info[current_mode] += line.strip
-			end
+		# --- PEM 파일 처리 ---
+		if !File.exist?(pem_file)
+			puts "    [ERROR] PEM file not found: #{pem_file}".red
+			next
 		end
-		file.close unless file.nil?
 
-		#puts cert_info['pubkey' + i]
-
-		# public key 이외의 정보 저장
-		file = File.open( folder + "certificate" + i + ".txt" )
-		file.each_line do |line|
-			if line.start_with?( 'subject=' ) then
-				current_mode = 'subject' + i
+		puts "    [INFO] Processing PEM file: #{pem_file}".cyan
+		begin
+			File.foreach(pem_file) do |line|
+			if line.start_with?('Modulus')
+				current_mode = "pubkey#{i}"
 				next
 			end
-			if line.start_with?( 'issuer=' ) then
-				current_mode = 'issuer' + i
+			if line.start_with?('Exponent')
+				current_mode = nil
 				next
 			end
-			if line.start_with?( 'serial=' ) then
-				cert_info['serial' + i] = line.split( '=' )[1].strip
-				next
+			cert_info[current_mode] += line.strip if current_mode
 			end
-			if line.start_with?( 'notBefore=' ) then
-				cert_info['valid_from' + i] = line.split( '=' )[1].strip
-				next
-			end
-			if line.start_with?( 'notAfter=' ) then
-				cert_info['valid_to' + i] = line.split( '=' )[1].strip
-				next
-			end
-			if line.start_with?( '-----BEGIN PUBLIC KEY-----' ) then
-				current_mode = 'pubkey' + i
-				next
-			end
-			if line.start_with?( '-----END PUBLIC KEY-----' ) then
-				current_mode = 'none'
-				next
-			end
-
-			# 'Subject' / 'Issuer' 문자열 구성
-			if current_mode == 'subject' + i or current_mode == 'issuer' + i then
-				key = line.split( '=' )[0].strip
-				value = line.split( '=' )[1].strip	
-				if key == 'userId' then
-					cert_info[current_mode] += ( "/UID=" + value )
-				end
-				if key == 'commonName' then
-					cert_info[current_mode] += ( "/CN=" + value )
-				end
-				if key == 'organizationalUnitName' then
-					cert_info[current_mode] += ( "/OU=" + value )
-				end
-				if key == 'organizationName' then
-					cert_info[current_mode] += ( "/O=" + value )
-				end
-				if key == 'countryName' then
-					cert_info[current_mode] += ( "/C=" + value )
-				end
-			end
-
+		rescue => e
+			puts "    [ERROR] Failed to process PEM file #{pem_file}: #{e.message}".red
 		end
-		file.close unless file.nil?
 
-		certificate += ( "##$##&AI" + i + $app_id + "\n" )
-		certificate += ( "##$##&TI" + i + $team_id + "\n" )
-		certificate += ( "##$##&SJ" + i + cert_info['subject'    + i] + "\n" )
-		certificate += ( "##$##&IS" + i + cert_info['issuer'     + i] + "\n" )
-		certificate += ( "##$##&SN" + i + cert_info['serial'     + i] + "\n" )
-		certificate += ( "##$##&PK" + i + cert_info['pubkey'     + i] + "\n" )
-		certificate += ( "##$##&VF" + i + cert_info['valid_from' + i] + "\n" )
-		certificate += ( "##$##&VT" + i + cert_info['valid_to'   + i] + "\n" )
-	end
+		# --- 인증서 텍스트 파일 처리 ---
+		if !File.exist?(cert_file)
+			puts "    [ERROR] Certificate file not found: #{cert_file}".red
+			next
+		end
 
-	if $antiswizzle == 'enable' then
-		certificate += ( "##&##*ASENABLE\n" )
-	end
-	if $antihook == 'disable' then
-		certificate += ( "##&##*AAHDISABLE\n" )
-	end
+		puts "    [INFO] Processing certificate file: #{cert_file}".cyan
+		begin
+			File.foreach(cert_file) do |line|
+			if line.start_with?('subject=')
+				current_mode = "subject#{i}"
+				next
+			end
+			if line.start_with?('issuer=')
+				current_mode = "issuer#{i}"
+				next
+			end
+			if line.start_with?('serial=')
+				cert_info["serial#{i}"] = line.split('=', 2)[1].to_s.strip
+				next
+			end
+			if line.start_with?('notBefore=')
+				cert_info["valid_from#{i}"] = line.split('=', 2)[1].to_s.strip
+				next
+			end
+			if line.start_with?('notAfter=')
+				cert_info["valid_to#{i}"] = line.split('=', 2)[1].to_s.strip
+				next
+			end
+			if line.start_with?('-----BEGIN PUBLIC KEY-----')
+				current_mode = "pubkey#{i}"
+				next
+			end
+			if line.start_with?('-----END PUBLIC KEY-----')
+				current_mode = nil
+				next
+			end
+
+			# subject/issuer DN 필드 처리
+			if current_mode == "subject#{i}" || current_mode == "issuer#{i}"
+				key, value = line.split('=', 2).map(&:strip) rescue [nil, nil]
+				next unless key && value
+				case key
+				when 'userId'
+				cert_info[current_mode] += "/UID=#{value}"
+				when 'commonName'
+				cert_info[current_mode] += "/CN=#{value}"
+				when 'organizationalUnitName'
+				cert_info[current_mode] += "/OU=#{value}"
+				when 'organizationName'
+				cert_info[current_mode] += "/O=#{value}"
+				when 'countryName'
+				cert_info[current_mode] += "/C=#{value}"
+				end
+			end
+			end
+		rescue => e
+			puts "    [ERROR] Failed to process certificate file #{cert_file}: #{e.message}".red
+		end
+
+		# --- certificate 문자열 조립 ---
+		certificate += "##$##&AI#{i}#{$app_id}\n"
+		certificate += "##$##&TI#{i}#{$team_id}\n"
+		certificate += "##$##&SJ#{i}#{cert_info["subject#{i}"]}\n"
+		certificate += "##$##&IS#{i}#{cert_info["issuer#{i}"]}\n"
+		certificate += "##$##&SN#{i}#{cert_info["serial#{i}"]}\n"
+		certificate += "##$##&PK#{i}#{cert_info["pubkey#{i}"]}\n"
+		certificate += "##$##&VF#{i}#{cert_info["valid_from#{i}"]}\n"
+		certificate += "##$##&VT#{i}#{cert_info["valid_to#{i}"]}\n"
+    end
+
+    if defined?($antiswizzle) && $antiswizzle == 'enable'
+    	certificate += "##&##*ASENABLE\n"
+    end
+    if defined?($antihook) && $antihook == 'disable'
+    	certificate += "##&##*AAHDISABLE\n"
+    end
+
+    puts "    [INFO] Certificate extraction completed.".cyan
+    # certificate 변수에 결과가 저장됨
 
 	#........................................................................................
 	# [Step 9] Payload/app/_CodeSignature/CodeResources 파일 읽기
-
-	$current_step += 1
-	puts "\n" + $current_step.to_s + ". Generating app integrity/certificate snapshot ..."
-	snapshot = certificate + generate_hash_snapshot( app.to_s + "/_CodeSignature/CodeResources" )
+	puts "\n[STEP #{$current_step += 1}] Generating app integrity/certificate snapshot ...".bold.yellow
+	snapshot = certificate + generate_hash_snapshot( $app_path + "/_CodeSignature/CodeResources" )
 
 	#........................................................................................
-	# [Step 10] Assets.car 파일 모두 찾기
+	# [Step 10] Assets.car 검색 (공백 안전한 버전)
 	assets = ''
-	files = Dir.glob( app.to_s + '/**/Assets.car' ).select { |path| File.file?(path) }
+	assets_pattern = File.join($app, '**', 'Assets.car')
+	files = Dir.glob(assets_pattern, File::FNM_CASEFOLD).select { |path| File.file?(path) }
+
+	if files.empty?
+	puts "[WARNING] No Assets.car files found".yellow
+	else
 	files.each do |car|
-		assets += ( car.sub!( app.to_s + '/', '' ) + "\u0002" )
+		relative_path = car.sub(/#{Regexp.escape(File.join($app, ''))}/, '') # 마지막 / 포함
+		assets += "#{relative_path}\u0002"
+		puts "    [DEBUG] Found Assets.car: #{relative_path}".yellow
 	end
-	
+	assets.chomp!("\u0002") # 마지막 구분자 제거
+	end
+
 	#........................................................................................
 	# [Step 11] snapshot & assets를 API 서버로 전송해서 genesis 생성 (ruby에서 WF LEA 수행 불가능)
 
-	$current_step += 1
-	puts "\n" + $current_step.to_s + ". Encrypting app integrity/certificate snapshot ..."
-	# snapshot과 assets를 hex string 포맷으로 변경
+	puts "\n[STEP #{$current_step += 1}] Encrypting app integrity/certificate snapshot ...".bold.yellow
 	begin
-		snapshot = (snapshot.unpack ( 'H*' )).first
-		assets = (assets.unpack ( 'H*' )).first
-	rescue => e
-		puts ".\n.\nProblem has occurred while storing integrity-snapshot of your app, please try again.\n[Error] " + e.to_s + "\nIf this error occurs continuously, contact AppSealing Help Center.\n.\n.\n"
-		exit( false )
-	end
+		# ==================================================
+		# 1. Hex 변환 검증
+		# ==================================================
+		puts "    [DEBUG] Converting snapshot/assets to hex".yellow
+		raise "Invalid snapshot data" unless snapshot.is_a?(String) && !snapshot.empty?
 
-	host = $baseURL + 'v3/sdk/ios/requestGenesisForIOS'
-	uri = URI( host )
-	request = Net::HTTP::Post.new( uri )
+		snapshot_hex = snapshot.unpack('H*').first
+		assets_hex = assets.unpack('H*').first
+		puts "    [DEBUG] Hex conversion successful".yellow
 
-	form_data = [
-		['account_id_hash', $account_id_hash],
-		['bundle_id', $bundle_id], 
-		['snapshot', snapshot],
-		['assets', assets],
-		['sdk_version', $sdk_version]
-	]
-	request.set_form form_data, 'multipart/form-data'
+		# ==================================================
+		# 2. API 요청 파라미터 검증
+		# ==================================================
+		required_vars = {
+			account_id_hash: $account_id_hash,
+			bundle_id: $bundle_id,
+			sdk_version: $sdk_version,
+			baseURL: $baseURL
+		}
 
-	begin
-		response = Net::HTTP.start( uri.hostname, uri.port, use_ssl: uri.scheme == 'https' ) do |http|
-			http.request( request )
+		missing = required_vars.select { |k,v| v.nil? || v.to_s.strip.empty? }.keys
+		unless missing.empty?
+			raise "Missing required parameters: #{missing.join(', ')}"
 		end
 
-		result = JSON.parse( response.body )
+		# ==================================================
+		# 3. API 요청 실행
+		# ==================================================
+		uri = URI.parse("#{$baseURL}v3/sdk/ios/requestGenesisForIOS")
+		http = Net::HTTP.new(uri.host, uri.port)
+		http.use_ssl = uri.scheme == 'https'
+		http.open_timeout = 15
+		http.read_timeout = 30
 
-		code = result['result']['code']
-		message = result['result']['message']
-		if code != '0000' then
-			puts ".\n.\nError occured : " + message + "\nIf this error occurs continuously, contact AppSealing Help Center.\n.\n.\n"
-			puts ".\n.\n error code : " + code + "\n"
-			puts message
-			exit( false )			
+		request = Net::HTTP::Post.new(uri)
+		form_data = [
+			['account_id_hash', $account_id_hash],
+			['bundle_id', $bundle_id],
+			['snapshot', snapshot_hex],
+			['assets', assets_hex],
+			['sdk_version', $sdk_version]
+		]
+		request.set_form(form_data, 'multipart/form-data')
+
+		puts "    [INFO] Sending request to #{uri}".cyan
+		response = http.request(request)
+
+		# ==================================================
+		# 4. 응답 처리
+		# ==================================================
+		unless response.code == '200'
+			raise "HTTP Error: #{response.code} - #{response.message}"
 		end
-		genesis_response = result['genesis']
+
+		parsed_response = JSON.parse(response.body)
+
+		unless parsed_response.dig('result', 'code') == '0000'
+			error_msg = parsed_response.dig('result', 'message') || 'Unknown error'
+			raise "API Error: #{error_msg}"
+		end
+
+		genesis_hex = parsed_response['genesis']
+			unless genesis_hex.is_a?(String) && !genesis_hex.empty?
+			raise "Invalid genesis data in response"
+		end
+
+		# ==================================================
+		# 5. 파일 저장
+		# ==================================================
+		genesis_path = File.join($app_path, 'genesis')
+		puts "    [INFO] Writing genesis file to #{genesis_path}".cyan
+
+		File.open(genesis_path, 'wb') do |f|
+		f.write([genesis_hex].pack('H*'))
+		end
+		puts "    [SUCCESS] Genesis file saved successfully".green
+
+	rescue JSON::ParserError => e
+		puts <<~ERROR.red.bold
+		[CRITICAL] Failed to parse API response
+		Response Body: #{response.body[0..200]}...
+		Error: #{e.message}
+		ERROR
+		exit(false)
+
 	rescue => e
-		puts "Request failed : " + e.to_s + "\n.\n.\n"
-		exit( false )
+		puts <<~ERROR.red.bold
+		[ERROR] Process failed
+		Step: #{$current_step}
+		Message: #{e.message}
+		Backtrace:
+		#{e.backtrace.first(5).join("\n")}
+		ERROR
+		exit(false)
 	end
-
-	genesis_binary = File.open( app.to_s + '/genesis', "wb" )
-	genesis_binary.write([genesis_response].pack( 'H*' ))
-    
-	genesis_binary.close()
-
 
 	#........................................................................................
 	# [Step 12] 파라미터로 넘겨진 IPA에서 certificate / entitlement 를 추출하여 codesign 진행
 
-	$current_step += 1
-	puts "\n" + $current_step.to_s + ". Codesigning your app using certificate used to sign your IPA ..."
-	sign_app_payload( app, folder, false )
+	puts "\n[STEP #{$current_step += 1}] Codesigning your app using certificate used to sign your IPA ...".bold.yellow
+	sign_app_payload( $app, $folder, false )
 
 
 	#........................................................................................
 	# [Step 13] IPA로 묶음
 
-	$current_step += 1
-	puts "\n" + $current_step.to_s + ". Rebuilding & re-sigining IPA ..."
-	ipa = '"' + ARGV[0] + '_Resigned.ipa"'
-	File.delete( ipa ) if File.exist?( ipa )
-	
-	ipa = File.basename( ARGV[0] ) + "_Resigned.ipa"
-	system( 'cd ' + folder + 'Package;zip -qr "' + ipa + '" ./' )
-	system( 'mv "' + folder + "Package/" + ipa + '" "' + ARGV[0] + '"' )
-	system( "rm -rf " + folder + "*;rmdir " + folder )
-	
-	puts "\n\n>>> All processes have done successfully .......\n\n\n"
+	begin
+		puts "\n[STEP #{$current_step += 1}] Rebuilding & Re-signing IPA".bold.yellow
+
+		# --------------------------------------------------
+		# 1. 출력 IPA 경로 설정
+		# --------------------------------------------------
+		original_ipa = ARGV[0]
+		resigned_ipa = File.join(
+			File.dirname(original_ipa),
+			"#{File.basename(original_ipa, '.*')}.ipa"
+		)
+		puts "  • Output IPA: #{resigned_ipa}"
+
+		# --------------------------------------------------
+		# 2. 기존 IPA 삭제 (존재할 경우)
+		# --------------------------------------------------
+		if File.exist?(resigned_ipa)
+			puts "    [INFO] Removing existing IPA: #{resigned_ipa}".cyan
+			FileUtils.rm(resigned_ipa, force: true)
+		end
+
+		# --------------------------------------------------
+		# 3. 새 IPA 패키징
+		# --------------------------------------------------
+		package_dir = File.join($folder, "Package")
+		puts "    [INFO] Packaging from: #{package_dir}".cyan
+
+		zip_command = [
+			"cd #{Shellwords.escape(package_dir)}",
+			"zip -qr #{Shellwords.escape(resigned_ipa)} ./*"
+		].join(" && ")
+
+		unless system(zip_command)
+			raise "IPA packaging failed (exit #{$?.exitstatus})"
+		end
+		puts "    [SUCCESS] ZIP command executed successfully".green
+
+		# --------------------------------------------------
+		# 4. 생성된 IPA 검증
+		# --------------------------------------------------
+		unless File.exist?(resigned_ipa)
+			raise "Resigned IPA not created: #{resigned_ipa}"
+		end
+		puts "    [SUCCESS] IPA created: #{File.size(resigned_ipa)} bytes".green
+
+		# --------------------------------------------------
+		# 5. 임시 파일 정리 (안전한 삭제)
+		# --------------------------------------------------
+		puts "    [INFO] Cleaning temporary files".cyan
+		FileUtils.remove_entry_secure($folder, force: true)
+		puts "    [DEBUG] Temp directory removed: #{$folder}".yellow
+
+	rescue => e
+		puts <<~ERROR.red.bold
+			[CRITICAL ERROR] IPA rebuild failed
+			Step: #{$current_step}
+			Message: #{e.message}
+			Backtrace:
+			#{e.backtrace.first(5).join("\n")}
+		ERROR
+		exit(false)
+	end
+
+	puts "\n\n[END] All processes have done successfully .......\n\n\n".bold.green
 end

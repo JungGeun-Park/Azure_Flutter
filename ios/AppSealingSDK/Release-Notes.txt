@@ -2,9 +2,14 @@
 	AppSealing SDK Release Notes
 ==========================================
 
-Version 1.10.2.0.c (March 12, 2025)
-	- Fixed crash in detecting thread at app termination
+Version 1.11.0.0 (June 2nd, 2025)
+    - Support Xcode Framework
+	- Support ARM64 Simulator (only for Xcode Framework)
+	- Fix some crashes within anti-swizzling routine due to dynamically removed methods
 	- Improved app launching delay
+	- Support Azure, Bitrise, Circle CI integration
+	- Support automatic hermes manipulation & verfication
+	- Fixed certificate re-signed false positive error
 
 Version 1.10.1.0 (March 12, 2025)
 	- Support React Native 0.77.x, 0.78.0
