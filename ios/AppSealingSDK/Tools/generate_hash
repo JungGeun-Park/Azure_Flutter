@@ -4274,13 +4274,13 @@ begin
             ENV.key?("CIRCLECI")                # CircleCI
         )
 
-    force_secure = ENV["FORCE_SECURE_STORAGE"].to_s.upcase == "TRUE"
+    force_secure = ENV["FORCE_SECURE_FILESYSTEM"].to_s.upcase == "TRUE"
 
-    # 1. FORCE_SECURE_STORAGE has absolute priority in CI
+    # 1. FORCE_SECURE_FILESYSTEM has absolute priority in CI
     if ci_environment && force_secure
         $securestorage = "enable"
 
-        puts "\n[STEP #{$current_step += 1}] Secure Filesystem forcibly enabled (FORCE_SECURE_STORAGE=TRUE).".bold.yellow
+        puts "\n[STEP #{$current_step += 1}] Secure Filesystem forcibly enabled (FORCE_SECURE_FILESYSTEM=TRUE).".bold.yellow
         puts "    [INFO] CI environment detected. SwiftSyntax verification skipped.".yellow
 
     # 2. Normal securestorage enable flow
