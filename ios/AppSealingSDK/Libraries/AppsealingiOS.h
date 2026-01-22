@@ -9,18 +9,18 @@
 #ifndef AppsealingiOS_h
 #define AppsealingiOS_h
 
-// 앱 해킹 UI용 샘플코드에 사용되는 코드
-#define ERROR_NONE                      0x00000000
-#define DETECTED_JAILBROKEN             0x00000001
-#define DETECTED_DRM_DECRYPTED          0x00000002
-#define DETECTED_DEBUG_ATTACHED         0x00000004
-#define DETECTED_HASH_INFO_CORRUPTED    0x00000008
-#define DETECTED_CODESIGN_CORRUPTED     0x00000010
-#define DETECTED_HASH_MODIFIED          0x00000020
-#define DETECTED_EXECUTABLE_CORRUPTED   0x00000040
-#define DETECTED_CERTIFICATE_CHANGED    0x00000080
-#define DETECTED_BLACKLIST_CORRUPTED    0x00000100
-#define DETECTED_CHEAT_TOOL             0x00000200
+// Code used in sample code for app hacking UI
+extern const int kAppSealingErrorNone;
+extern const int kAppSealingErrorJailbreakDetected;
+extern const int kAppSealingErrorDRMDecrypted;
+extern const int kAppSealingErrorDebugAttached;
+extern const int kAppSealingErrorHashInfoCorrupted;
+extern const int kAppSealingErrorCodesignCorrupted;
+extern const int kAppSealingErrorHashModified;
+extern const int kAppSealingErrorExecutableCorrupted;
+extern const int kAppSealingErrorCertificateChanged;
+extern const int kAppSealingErrorBlacklistCorrupted;
+extern const int kAppSealingErrorCheatToolDetected;
 
 #import <Foundation/Foundation.h>
 
@@ -32,29 +32,35 @@
 #endif
 #endif
 
-#define CFSTR(cStr)  __CFStringMakeConstantString( cStr )
-
 extern void Appsealing(void);
 #ifdef __cplusplus
 extern "C" {
 #endif
-extern int ObjC_IsAbnormalEnvironmentDetected();
-extern int ObjC_IsSwizzlingDetected();
-extern int ObjC_IsSwizzlingDetectedReturn();
-extern int ObjC_GetAppSealingDeviceID( char* deviceIDBuff );
-extern int ObjC_GetEncryptedCredential( char* buffer );
-extern char* ObjC_DecryptString( char* string );
+int ObjC_IsAbnormalEnvironmentDetected() __attribute__((deprecated("This method is deprecated. Use _IsAbnormalEnvironmentDetectedAsync instead.")));
+int ObjC_IsSwizzlingDetected();
+int ObjC_IsSwizzlingDetectedReturn();
+int ObjC_GetAppSealingDeviceID( char* deviceIDBuff );
+int ObjC_GetEncryptedCredential( char* buffer ) __attribute__((deprecated("This method is deprecated. Use _GetEncryptedCredentialAsync instead.")));
+char* ObjC_DecryptString( char* string );
+int SecureStorage_AES256_Encrypt( uint8_t* plaintext, size_t plaintext_len, const uint8_t* iv, uint8_t* ciphertext_out, size_t* ciphertext_len_out );
+int SecureStorage_AES256_Decrypt( const uint8_t* ciphertext, size_t ciphertext_len, const uint8_t* iv, uint8_t* plaintext_out, size_t* plaintext_len_out );
 #ifdef __cplusplus
 }
 #endif
 
 @interface AppSealingInterface : NSObject
-- ( int )_IsAbnormalEnvironmentDetected;
-+ (void)_NotifySwizzlingDetected:(void (^)(NSString*))handler;
+- ( int )_IsAbnormalEnvironmentDetected __attribute__((deprecated("This method is deprecated. Use _IsAbnormalEnvironmentDetectedAsync instead.")));
+- ( void )_IsAbnormalEnvironmentDetectedAsync:(void (^)(int result))completion;
++ ( void )_NotifySwizzlingDetected:(void (^)(NSString*))handler;
 - ( const char* )_GetAppSealingDeviceID;
-- ( const char* )_GetEncryptedCredential;
+- ( const char* )_GetEncryptedCredential __attribute__((deprecated("This method is deprecated. Use _GetEncryptedCredentialAsync instead.")));
+- ( void )_GetEncryptedCredentialAsync:(void (^)(const char *result))completion;
 + ( NSString* )_DSS: ( NSString* )string;  // Decrypt String (for Objective-C / Swift string)
 + ( NSString* )_DSC: ( char* )string;      // Decrypt String (for C string)
+- ( BOOL )_EncryptData:( NSData* )plain iv:( NSData* )iv cipherOut:( NSMutableData* )cipherOut outLen:( size_t* )outLen;
+- ( BOOL )_DecryptData:( NSData* )cipher iv:( NSData* )iv plainOut:( NSMutableData* )plainOut outLen:( size_t* )outLen;
+- ( NSString* )_EncryptString:( NSString* )plain iv:( NSData* )iv;
+- ( NSString* )_DecryptString:( NSString* )cipher iv:( NSData* )iv;
 @end
 
 #if REACT_NATIVE_0_71

@@ -2,6 +2,31 @@
 	AppSealing SDK Release Notes
 ==========================================
 
+Version 1.12.0.0 (January 28th, 2026)
+	- Support Secure UserDefaults : all values in UserDefaults are strongly protected (optional)
+	- Support Secure Filesystem : all user file contents are strongly protected (optional)
+	- Support React Native 0.79.x, 0.80.x, 0.81.x, 0.82.x, 0.83.x
+	- Fixed generate_hash ssl error
+	- Improved interface API to fix occasional crash
+
+Version 1.11.6.0 (November 12th, 2025)
+    - (Unity) Rollbacked Unity script to pre-1.11 version singleton behavior.
+	- (Unity) Commented out credential code from the template code due to it causing the game to freeze when the device of iOS 26 is offline.
+	  These two breaking changes in Unity script require you to update Check_iOS_Security.cs for this release.
+	- (Xcode) Added easy integration script for native projects to be integrated easily.
+	  Give execution permission (chmod +x AppSealingSDK/Tools/install.sh) and run AppSealingSDK/Tools/install.sh to automatically integrate the SDK.
+	  After applying, you can also use AppSealingSDK/Tools/ApplySealing.sh to build a Transporter-ready IPA. (ApplySealing.sh is EXPERIMENTAL)
+
+Version 1.11.2.0 (June 20, 2025)
+	- Fixed an error where an incorrect Credential value is returned after the second call to GetEncryptedCredentialAsync
+	- Fixed a project path to be searched first in the source code search path when using String Encryption
+	- Fixed a ruby ​​environment encoding to be forcibly set to UTF-8 when using String Encryption
+	- Fixed a symptom where constant values ​​defined in AppsealingiOS.h caused duplicate definition errors
+	- Changed the AppsealingiOS.mm and LEASection.mm files to be restored after compilation when using String Encryption
+	- Changed the generate_hash script to treat it as an error and terminate the task if an absolute path is not used for the IPA path parameter.
+	- Changed the generate_hash script to treat it as an error and terminate the task if it encounters an ambiguity issue where more than two signing certificates are found.
+	- Changed Unreal Plugin sample code to call Unreal_GetEncryptedCredential and Unreal_IsAbnormalEnvironmentDetected functions asynchronously.
+
 Version 1.11.0.0 (June 2nd, 2025)
     - Support Xcode Framework
 	- Support ARM64 Simulator (only for Xcode Framework)
