@@ -1,3 +1,10 @@
+#=============================================================================================================================================================
+#
+#
+# Azure Script code for Flutter project
+#
+#
+#=============================================================================================================================================================
 trigger:
 - develop
 
@@ -5,10 +12,17 @@ pool:
   name: APPSEALING
 
 steps:
-# 1) Setup temporary keychain and import certificate
+# 1) Ensure Flutter is installed and setup temporary keychain
 - script: |
-    set -e
-    P12_CERT_PATH="$(Build.SourcesDirectory)/distribution.p12"
+    if ! command -v flutter &> /dev/null; then
+      echo "Flutter is not installed. Installing Flutter..."
+      brew install --cask flutter
+      flutter --version
+    else
+      echo "Flutter is already installed."
+    fi
+
+    P12_CERT_PATH="$(Build.SourcesDirectory)/ios/distribution.p12"
     KEYCHAIN_PATH="$HOME/Library/Keychains/temp-keychain.keychain-db"
     KEYCHAIN_PASSWORD="temp123"
 
@@ -22,70 +36,74 @@ steps:
     security import "$P12_CERT_PATH" -k "$KEYCHAIN_PATH" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
     security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
     security find-identity -v "$KEYCHAIN_PATH"
-  displayName: 'Setup Keychain'
+  displayName: 'Setup Flutter and Keychain'
   env:
     CERTIFICATE_PASSWORD: $(CERTIFICATE_PASSWORD)
 
-# 2) Install provisioning profile and extract UUID
+# 2) Set scheme and app name for Flutter iOS
 - script: |
-    set -euxo pipefail
-
-    PROVISIONING_PROFILE_PATH="$(Build.SourcesDirectory)/profile.mobileprovision"
-    PP_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
-
-    echo "Installing provisioning profile..."
-    mkdir -p "$PP_DIR"
-
-    TMP_PLIST="$(mktemp)"
-    security cms -D -i "$PROVISIONING_PROFILE_PATH" > "$TMP_PLIST"
-
-    PP_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$TMP_PLIST")
-
-    echo "Provisioning Profile UUID: $PP_UUID"
-    cp "$PROVISIONING_PROFILE_PATH" "$PP_DIR/$PP_UUID.mobileprovision"
-
-    echo "##vso[task.setvariable variable=PROFILE_UUID]$PP_UUID"
-  displayName: 'Install Provisioning Profile'
-
-# 3) Extract scheme and app name
-- script: |
-    SCHEME_NAME=$(xcodebuild -list -json | (python -c 'import sys, json; print(json.load(sys.stdin)["project"]["schemes"][0])' || python3 -c 'import sys, json; print(json.load(sys.stdin)["project"]["schemes"][0])'))
-    APP_NAME=$(xcodebuild -list -json | (python -c 'import sys, json; print(json.load(sys.stdin)["project"]["targets"][0])' || python3 -c 'import sys, json; print(json.load(sys.stdin)["project"]["targets"][0])'))
-
+    SCHEME_NAME="Runner"
+    APP_NAME="Runner"
     echo "##vso[task.setvariable variable=SCHEME_NAME]$SCHEME_NAME"
     echo "##vso[task.setvariable variable=APP_NAME]$APP_NAME"
-  displayName: 'Extract Scheme and App Name'
+  displayName: 'Set Scheme and App Name'
 
-# 4) Increment build number
+# 3) Increment build number
 - script: |
-    cd "/Users/puzznic/Project/Azure_Agent/_work/2/s/$(APP_NAME).xcodeproj"
+    cd "$(Build.SourcesDirectory)"
+    flutter pub get
+
     agvtool next-version -all
     NEW_BUILD_NUMBER=$(agvtool what-version -terse)
     echo "##vso[task.setvariable variable=BUILD_NUMBER]$NEW_BUILD_NUMBER"
   displayName: 'Increment Build Number'
 
-# 5) Extract bundle ID and create ExportOptions.plist (XML)
+# 4) Install provisioning profile, extract bundle ID and create ExportOptions.plist (XML)
 - script: |
-    INFO_PLIST_PATH="${BUILD_SOURCESDIRECTORY}/${APP_NAME}/Info.plist"
-    BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$INFO_PLIST_PATH" 2>/dev/null)
+    set -euxo pipefail
 
-    if [[ -z "$BUNDLE_ID" ]]; then
-        echo "CFBundleIdentifier not found in Info.plist. Trying xcodebuild..."
+    PROVISIONING_PROFILE_PATH="$(Build.SourcesDirectory)/ios/profile.mobileprovision"
+    PP_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+    mkdir -p "$PP_DIR"
+
+    TMP_PLIST="$(mktemp)"
+    security cms -D -i "$PROVISIONING_PROFILE_PATH" > "$TMP_PLIST"
+    PP_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$TMP_PLIST")
+    cp "$PROVISIONING_PROFILE_PATH" "$PP_DIR/$PP_UUID.mobileprovision"
+    echo "##vso[task.setvariable variable=PROFILE_UUID]$PP_UUID"
+
+    INFO_PLIST_PATH="$(Build.SourcesDirectory)/ios/Runner/Info.plist"
+    if [ -f "$INFO_PLIST_PATH" ]; then
+      echo "Extracting CFBundleIdentifier from Info.plist..."
+      BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$INFO_PLIST_PATH" 2>/dev/null || true)
+      if [[ "$BUNDLE_ID" == *"$"* ]] || [ -z "$BUNDLE_ID" ]; then
+        echo "Variable or empty value detected. Falling back to Xcode build settings..."
         BUNDLE_ID=$(xcodebuild -showBuildSettings \
-            -project "${BUILD_SOURCESDIRECTORY}/Azure_Swift.xcodeproj" \
-            -scheme "${SCHEME_NAME}" | \
-            grep -E '^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER[[:space:]]*=' | sed 's/.*= //')
+          -project "$(Build.SourcesDirectory)/ios/Runner.xcodeproj" \
+          -scheme Runner \
+          -configuration Release \
+          -sdk iphoneos | \
+          grep -E '^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER[[:space:]]*=' | sed 's/.*= //')
+      fi
+    else
+      echo "Info.plist not found. Extracting from Xcode build settings..."
+      BUNDLE_ID=$(xcodebuild -showBuildSettings \
+        -project "$(Build.SourcesDirectory)/ios/Runner.xcodeproj" \
+        -scheme Runner \
+        -configuration Release \
+        -sdk iphoneos | \
+        grep -E '^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER[[:space:]]*=' | sed 's/.*= //')
     fi
 
-    if [[ -z "$BUNDLE_ID" ]]; then
-        echo "Error: Bundle identifier not found."
-        exit 1
+    if [ -z "$BUNDLE_ID" ]; then
+      echo "Bundle identifier not found."
+      exit 1
     fi
 
     echo "Final BUNDLE_ID: $BUNDLE_ID"
     echo "##vso[task.setvariable variable=BUNDLE_ID]$BUNDLE_ID"
 
-    EXPORT_DIR="$HOME/exports"
+    EXPORT_DIR="$(Build.ArtifactStagingDirectory)"
     mkdir -p "$EXPORT_DIR"
     cat << EOF > "$EXPORT_DIR/ExportOptions.plist"
     <?xml version="1.0" encoding="UTF-8"?>
@@ -106,37 +124,40 @@ steps:
     </dict>
     </plist>
     EOF
-  displayName: 'Extract Bundle ID and Create ExportOptions.plist'
+  displayName: 'Install Provisioning Profile and Create ExportOptions.plist'
   env:
     TEAM_ID: $(TEAM_ID)
     PROVISIONING_PROFILE_NAME: $(PROVISIONING_PROFILE_NAME)
 
-# 6) Build and export IPA
+# 5) Build and export IPA
 - script: |
     EXPORT_DIR="$(Build.ArtifactStagingDirectory)"
-    IPA_PATH="$EXPORT_DIR/$(APP_NAME).ipa"
-    ARCHIVE_PATH="$EXPORT_DIR/$(APP_NAME).xcarchive"
-    WORKSPACE_PATH="$(Build.SourcesDirectory)/$(APP_NAME).xcodeproj/project.xcworkspace"
+    IPA_PATH="$EXPORT_DIR/Runner.ipa"
+    ARCHIVE_PATH="$EXPORT_DIR/Runner.xcarchive"
+    WORKSPACE_PATH="$(Build.SourcesDirectory)/ios/Runner.xcworkspace"
 
     echo "Updating deployment target to 12.0..."
-    /usr/libexec/PlistBuddy -c "Set :IPHONEOS_DEPLOYMENT_TARGET 12.0" "$(Build.SourcesDirectory)/$(APP_NAME)/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :IPHONEOS_DEPLOYMENT_TARGET 12.0" "$(Build.SourcesDirectory)/ios/Runner/Info.plist"
 
-    echo "Starting Xcode archive..."
+    echo "Building Flutter iOS app..."
+    flutter build ios --release --no-codesign
+
+    echo "Archiving Xcode project..."
     xcodebuild -workspace "$WORKSPACE_PATH" \
-               -scheme '$(SCHEME_NAME)' \
-               -sdk iphoneos \
-               -configuration 'Release' \
-               clean archive \
-               CODE_SIGN_IDENTITY="iPhone Distribution" \
-               CODE_SIGN_STYLE="Manual" \
-               DEVELOPMENT_TEAM="$TEAM_ID" \
-               PROVISIONING_PROFILE_SPECIFIER="$PROVISIONING_PROFILE_NAME" \
-               -archivePath "$ARCHIVE_PATH"
+      -scheme 'Runner' \
+      -sdk iphoneos \
+      -configuration 'Release' \
+      clean archive \
+      CODE_SIGN_IDENTITY="Apple Distribution" \
+      CODE_SIGN_STYLE="Manual" \
+      DEVELOPMENT_TEAM="$TEAM_ID" \
+      PROVISIONING_PROFILE_SPECIFIER="$PROVISIONING_PROFILE_NAME" \
+      -archivePath "$ARCHIVE_PATH"
 
     echo "Exporting IPA..."
     xcodebuild -exportArchive \
       -archivePath "$ARCHIVE_PATH" \
-      -exportOptionsPlist "$HOME/exports/ExportOptions.plist" \
+      -exportOptionsPlist "$EXPORT_DIR/ExportOptions.plist" \
       -exportPath "$EXPORT_DIR"
 
     echo "IPA successfully exported: $IPA_PATH"
@@ -145,24 +166,28 @@ steps:
     TEAM_ID: $(TEAM_ID)
     PROVISIONING_PROFILE_NAME: $(PROVISIONING_PROFILE_NAME)
 
-# 7) Run generate_hash
+# 6) Run generate_hash
 - script: |
-    HASH_SCRIPT_PATH="$(Build.SourcesDirectory)/AppSealingSDK/Tools/generate_hash"
-    IPA_PATH="$(Build.ArtifactStagingDirectory)/$(APP_NAME).ipa"
+    HASH_SCRIPT_PATH="$(Build.SourcesDirectory)/ios/AppSealingSDK/Tools/generate_hash"
+    EXPORT_DIR="$(Build.ArtifactStagingDirectory)"
+    IPA_PATH=$(find "$EXPORT_DIR" -type f -name "*.ipa" | head -n 1)
 
     chmod +x "$HASH_SCRIPT_PATH"
     "$HASH_SCRIPT_PATH" "$IPA_PATH"
   displayName: 'Run generate_hash on IPA'
 
-# 8) Upload IPA to TestFlight
+# 7) Upload IPA to TestFlight
 - script: |
-    xcrun altool --upload-app -f "$(Build.ArtifactStagingDirectory)/$(APP_NAME).ipa" -t ios -u "$APPLE_ID" -p "$APP_SPECIFIC_PASSWORD"
+    EXPORT_DIR="$(Build.ArtifactStagingDirectory)"
+    IPA_PATH=$(find "$EXPORT_DIR" -type f -name "*.ipa" | head -n 1)
+
+    xcrun altool --upload-app -f "$IPA_PATH" -t ios -u "$APPLE_ID" -p "$APP_SPECIFIC_PASSWORD"
   displayName: 'Upload to TestFlight'
   env:
     APPLE_ID: $(APPLE_ID)
     APP_SPECIFIC_PASSWORD: $(APP_SPECIFIC_PASSWORD)
 
-# 9) Cleanup temporary keychain
+# 8) Cleanup temporary keychain
 - script: |
     echo "Deleting temporary keychain..."
     TEMP_KEYCHAIN_PATH="$HOME/Library/Keychains/temp-keychain.keychain-db"
